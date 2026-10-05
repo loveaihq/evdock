@@ -1,0 +1,24 @@
+{
+  "name": "evdock",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Receive MCP Events webhook deliveries on agents that are not on the public internet",
+  "license": "MIT",
+  "type": "module",
+  "engines": {
+    "node": ">=22.13"
+  },
+  "bin": {
+    "evdock": "dist/src/cli.js",
+    "evdock-conformance": "dist/src/conformance/cli.js"
+  },
+  "scripts": {
+    "build": "tsc -p .",
+    "test": "tsc -p . && node --test \"dist/test/**/*.test.js\""
+  },
+  "devDependencies": {
+    "@types/node": "22.20.5",
+    "standardwebhooks": "1.1.1",
+    "typescript": "7.0.2"
+  }
+}
