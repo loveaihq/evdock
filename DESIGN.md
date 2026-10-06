@@ -39,6 +39,7 @@ evdock 让不在公网上的 agent 也能收 MCP Events 的 webhook 投递：一
 
 依据是工作组的设计草案，草案改了这张表跟着改：
 https://github.com/modelcontextprotocol/experimental-ext-triggers-events/blob/main/docs/design-sketch-proposal.md
+2026-10-05 起草案以 SEP-3415 的形式提交给 MCP 主仓库，接收方的要求没变，见 `docs/spec/README.md`。
 
 | 规范对接收方的要求 | v0 做法 |
 | --- | --- |
@@ -53,7 +54,7 @@ https://github.com/modelcontextprotocol/experimental-ext-triggers-events/blob/ma
 | 路径已登记但订阅还没确认时收到投递 | 回 503，服务端稍后重投 |
 | body 超过 256 KiB | 回 413 |
 | gap 控制包，或续订响应里 `truncated: true` | 保存新游标，标记这段可能漏了事件 |
-| terminated 控制包 | 删除订阅，通知输出端 |
+| terminated 控制包 | 订阅标记为 terminated、停止续订，通知输出端（2026-10-06 由"删除订阅"改为标记，保留元数据便于查看和重订） |
 | 订阅有有效期 | 在 `refreshBefore` 之前重新 subscribe，带上最近保存的游标；`deliveryStatus.active` 为 false 时告警 |
 
 ## 密钥与信任边界

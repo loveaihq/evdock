@@ -3,3 +3,6 @@ dist/
 *.db
 *.db-wal
 *.db-shm
+
+# OpenAI docs are not openly licensed: keep the snapshot local, never commit it
+docs/spec/openai-*
