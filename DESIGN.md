@@ -30,7 +30,7 @@ evdock 让不在公网上的 agent 也能收 MCP Events 的 webhook 投递：一
 | 订阅管理 | 本地守护进程 | 以 MCP 客户端身份连服务端：`events/list`、`events/subscribe`、到期前续订、`events/unsubscribe`；每个订阅生成一个 `whsec_` 密钥；保存游标。 |
 | 接收校验 | 本地守护进程 | 对原始 body 验 HMAC；查时间戳；按 `webhook-id` 去重；识别 gap、terminated、verification 三种控制包。 |
 | 收件箱 | 本地守护进程 | SQLite 存事件、订阅、游标。 |
-| 输出 | 本地守护进程 | 两条路：本地 MCP 服务，把事件以 poll 或 push 再提供给支持 Events 的 agent；动作执行器，事件到达时跑一条预先配置的命令，不依赖 agent 支持 Events。 |
+| 输出 | 本地守护进程 | 动作执行器：事件到达时跑一条预先配置的命令，不依赖 agent 支持 Events。（原计划还有一个本地 MCP 服务，把事件以 poll 或 push 再提供给支持 Events 的 agent；2026-10-06 决定暂不做：查到的资料里还没有本地 agent 能消费，见 `docs/M4-TASK.md`。） |
 | 一致性测试套件 | 任意机器 | 一个模拟的 MCP Events 服务端，对着任意接收地址发各种情况并出报告。 |
 
 两种情况不需要中继：守护进程本身在公网或隧道后面；服务端对该事件提供 poll 或 push，守护进程直接取。
