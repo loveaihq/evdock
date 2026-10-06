@@ -165,3 +165,20 @@ body 大小（读 body 时）→ 路径是否登记 → 四个必需头 → 时�
 ### 测试用服务端
 
 - 两个测试服务端都有 `allowInsecureCallbacks` 开关，默认关闭，打开后接受 http 和本机回调地址。规范要求回调必须 https 且拦截内网地址，这是为了在没有中继的 M2 里本地测试。
+
+#### 模拟服务端（`src/conformance/mock-server.ts`，按 SEP-3415）
+
+- 事件自己载荷里的游标可以覆盖到它自己：SEP 535 行说，前面的事件都确认或放弃之后，事件 N 就可以带 cursor_N；接收方只有存下 N 才会存这个游标。订阅和续订响应里的游标仍然严格不越过任何未确认的事件。
+- TTL：取客户端建议值和默认值中较小的那个；`ttlMs: null` 也授予有限期限，因为这个模拟服务端只存在内存里（SEP 允许）。
+- 握手失败的原因：对方回 4xx/5xx 记为 `http_4xx`/`http_5xx`；回了 2xx 但没有正确回显记为 `challenge_failed`。SEP 609 和 626 行在这点上说法不一。3xx 没有对应的类别，算作 `http_4xx`。
+- 收到它不认识的游标（比如别的实例发的，相当于服务端重启过）：从当前位置开始投递，并返回 `truncated: true`。
+- 握手结果在实例存活期间一直缓存；失败的不缓存。
+- 方法级错误用 HTTP 200 返回；头和 `_meta` 出错用 400；未知方法用 404 加 -32601。没带令牌回 HTTP 401，不是 JSON-RPC 的 Forbidden。
+- 没做：轮换期间双签名（SHOULD），以及失败后把投递置为暂停（`active: false`）。
+
+#### 按 OpenAI 文档写的示例服务端（`test/fixtures/openai-server.ts`）
+
+- 文档和规范冲突时照文档，代码里都标了"Guide over spec"：能力声明在顶层 `events`；`events/*` 的结果不带 `resultType`；用 -32015；退订幂等，返回 `{}`；不发 gap 和 terminated；游标恒为 null；订阅存在 JSON 文件里，重启后还在。
+- 文档只给了 -32015 一个错误码，其余错误码按它引用的草案取（-32011、-32014）。
+- 签名照文档里的 Node 示例，用 `standardwebhooks` 库，所以轮换期间不双签名。
+- Node 自带的 `fetch` 做不到"连接时先检查地址再连上这个地址"，所以文档里的 `webhookFetch` 用 `node:http(s)` 实现，对 IP 字面量单独检查，不跟随重定向。
