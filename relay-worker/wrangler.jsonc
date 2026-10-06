@@ -1,0 +1,19 @@
+// The relay as a Cloudflare Worker (docs/M3-TASK.md, 设计决定 9). Free plan: one Worker in
+// front of one SQLite-backed Durable Object, which holds the paths and the stored deliveries.
+{
+	"$schema": "../node_modules/wrangler/config-schema.json",
+	"name": "evdock-relay",
+	"main": "src/index.ts",
+	// The newest date the pinned wrangler's workerd supports; a later one only draws a warning.
+	"compatibility_date": "2026-10-01",
+	"durable_objects": {
+		"bindings": [{ "name": "RELAY", "class_name": "Relay" }]
+	},
+	// The free plan only has SQLite-backed Durable Objects.
+	"migrations": [{ "tag": "v1", "new_sqlite_classes": ["Relay"] }],
+	// The relay key. Deployed: `wrangler secret put RELAY_KEY`. Local: a gitignored .dev.vars
+	// next to this file, or RELAY_KEY in the environment wrangler runs in.
+	"secrets": { "required": ["RELAY_KEY"] },
+	// No usage data to Cloudflare from wrangler runs on this project (types, dev, deploy).
+	"send_metrics": false
+}
