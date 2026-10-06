@@ -120,6 +120,20 @@ test('body over 256 KiB: 413; exactly 256 KiB is accepted', async (t) => {
   assert.equal((await post(sub, over, { id: 'evt_bigger' })).status, 413);
 });
 
+test('a body more than 1 MiB past the limit is cut off, and the receiver keeps working', async (t) => {
+  const { logs, register, post } = await setup(t);
+  const sub = register();
+  const huge = new ReadableStream<Uint8Array>({
+    start(controller) {
+      for (let i = 0; i < 24; i++) controller.enqueue(new Uint8Array(64 * 1024)); // 1.5 MiB
+      controller.close();
+    },
+  });
+  await assert.rejects(fetch(sub.url, { method: 'POST', body: huge, duplex: 'half' } as RequestInit));
+  assert.ok(logs.some((l) => l.includes('cut-oversized')));
+  assert.equal((await post(sub, eventJson('after'))).status, 200);
+});
+
 test('missing any of the four required headers: 400', async (t) => {
   const { inbox, register, post } = await setup(t);
   const sub = register();

@@ -13,16 +13,25 @@ export interface ReceiverOptions {
 
 const HOOK_PATH = /^\/hooks\/([A-Za-z0-9_-]+)$/;
 
+/** How far past the limit a body is still drained, so its sender sees the 413; beyond, the socket is cut. */
+const DRAIN_LIMIT = 1024 * 1024;
+
 // Reads the whole body. Past the limit it keeps draining (so the client gets a clean
-// 413 rather than a reset connection) but stops buffering.
-function readBody(req: IncomingMessage): Promise<Buffer | 'too-large'> {
+// 413 rather than a reset connection) but stops buffering, and gives up after DRAIN_LIMIT more.
+function readBody(req: IncomingMessage): Promise<Buffer | 'too-large' | 'cut'> {
   return new Promise((resolve, reject) => {
     const chunks: Buffer[] = [];
     let size = 0;
     req.on('data', (chunk: Buffer) => {
       size += chunk.length;
-      if (size > MAX_BODY_BYTES) chunks.length = 0;
-      else chunks.push(chunk);
+      if (size > MAX_BODY_BYTES + DRAIN_LIMIT) {
+        req.destroy();
+        resolve('cut');
+      } else if (size > MAX_BODY_BYTES) {
+        chunks.length = 0;
+      } else {
+        chunks.push(chunk);
+      }
     });
     req.on('end', () => resolve(size > MAX_BODY_BYTES ? 'too-large' : Buffer.concat(chunks)));
     req.on('error', reject);
@@ -80,6 +89,7 @@ export function createReceiver(options: ReceiverOptions): Server {
 
     try {
       const body = await readBody(req);
+      if (body === 'cut') return log(`- cut-oversized hook=${match[1]!.slice(0, 6)}… (over ${MAX_BODY_BYTES + DRAIN_LIMIT} bytes)`);
       if (body === 'too-large') return reply(413, 'too-large');
       const result = handleDelivery(options.inbox, {
         token: match[1]!,
