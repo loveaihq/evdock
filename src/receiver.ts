@@ -74,9 +74,10 @@ export function handleDelivery(
     return { status: 200, json: { challenge: message.challenge }, outcome: 'verification' };
   }
 
+  // Both are "an id this path has not been told to route": retryable, per the spec's 503/425.
   if (subscription.subscriptionId === null) return { status: 503, outcome: 'unconfirmed' };
   if (subscriptionIdHeader !== subscription.subscriptionId) {
-    return { status: 400, outcome: 'subscription-id-mismatch' };
+    return { status: 503, outcome: 'subscription-id-mismatch' };
   }
 
   let result;

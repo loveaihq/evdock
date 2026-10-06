@@ -1,4 +1,6 @@
 import assert from 'node:assert/strict';
+import { request } from 'node:http';
+import { connect } from 'node:net';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { createReceiver } from '../src/http.js';
@@ -169,14 +171,87 @@ test('malformed timestamp header or body: 400', async (t) => {
   assert.equal((await post(sub, 'not json')).status, 400);
 });
 
-test('unknown path: 404; wrong method: 405; X-MCP-Subscription-Id mismatch: 400', async (t) => {
-  const { base, register, post } = await setup(t);
+test('unknown path: 404; wrong method: 405; X-MCP-Subscription-Id mismatch: 503', async (t) => {
+  const { inbox, base, register, post } = await setup(t);
   const sub = register();
   const ghost = { ...sub, url: `${base}/hooks/${newToken()}` };
   assert.equal((await post(ghost, eventJson('e'))).status, 404);
   assert.equal((await fetch(`${base}/elsewhere`, { method: 'POST' })).status, 404);
   assert.equal((await fetch(sub.url)).status, 405);
-  assert.equal((await post(sub, eventJson('e'), { subscriptionId: 'sub_other' })).status, 400);
+  assert.equal((await post(sub, eventJson('e'), { subscriptionId: 'sub_other' })).status, 503);
+  assert.equal(inbox.messages(sub.token).length, 0);
+});
+
+test('a request target that is not a valid URL gets 404 and does not crash the receiver', async (t) => {
+  const { base, register, post } = await setup(t);
+  const { port } = new URL(base);
+  for (const target of ['http://a:b:c/hooks/abc', 'http://[x/hooks/abc', '//hooks/abc']) {
+    const response = await new Promise<string>((resolve, reject) => {
+      const socket = connect(Number(port), '127.0.0.1', () => {
+        socket.end(`POST ${target} HTTP/1.1\r\nHost: x\r\nContent-Length: 0\r\nConnection: close\r\n\r\n`);
+      });
+      let data = '';
+      socket.on('data', (chunk) => (data += chunk.toString()));
+      socket.on('end', () => resolve(data));
+      socket.on('error', reject);
+    });
+    assert.match(response, /^HTTP\/1\.1 404 /, target);
+  }
+  assert.equal((await post(register(), eventJson('after'))).status, 200, 'still serving');
+});
+
+// node:http (unlike fetch) can send repeated header lines and raw latin1 header bytes.
+function rawPost(url: string, headers: Record<string, string | string[]>, body: string) {
+  return new Promise<number>((resolve, reject) => {
+    const req = request(url, { method: 'POST', headers }, (res) => {
+      res.resume();
+      resolve(res.statusCode!);
+    });
+    req.on('error', reject);
+    // A Buffer, not a string: with a string body node:http writes the headers in the body's encoding.
+    req.end(Buffer.from(body));
+  });
+}
+
+test('webhook-signature sent as repeated header lines is read as one list', async (t) => {
+  const { register } = await setup(t);
+  const sub = register();
+  for (const order of ['bad-first', 'good-first']) {
+    const id = `evt_${order}`;
+    const body = eventJson(id);
+    const good = officialSign(sub.secret, id, NOW, body);
+    const bad = officialSign(newSecret(), id, NOW, body);
+    const status = await rawPost(
+      sub.url,
+      {
+        'webhook-id': id,
+        'webhook-timestamp': String(NOW),
+        'webhook-signature': order === 'bad-first' ? [bad, good] : [good, bad],
+        'x-mcp-subscription-id': sub.subscriptionId,
+      },
+      body,
+    );
+    assert.equal(status, 200, order);
+  }
+});
+
+test('a non-ASCII webhook-id is verified over its UTF-8 bytes', async (t) => {
+  const { inbox, register } = await setup(t);
+  const sub = register();
+  const id = 'évt_ü_1';
+  const body = eventJson(id);
+  const status = await rawPost(
+    sub.url,
+    {
+      'webhook-id': Buffer.from(id, 'utf8').toString('latin1'), // node:http writes header strings as latin1
+      'webhook-timestamp': String(NOW),
+      'webhook-signature': officialSign(sub.secret, id, NOW, body),
+      'x-mcp-subscription-id': sub.subscriptionId,
+    },
+    body,
+  );
+  assert.equal(status, 200);
+  assert.equal(inbox.messages(sub.token)[0]?.webhookId, id);
 });
 
 test('gap: 200, fresh cursor saved, possible gap marked', async (t) => {
@@ -193,8 +268,7 @@ test('terminated: 200, subscription removed, later deliveries get 404', async (t
   const body = JSON.stringify({ type: 'terminated', error: { code: -32012, message: 'Forbidden', data: { reason: 'Access revoked' } } });
   assert.equal((await post(sub, body, { id: 'msg_terminated_1' })).status, 200);
   assert.equal(inbox.getSubscription(sub.token), undefined);
-  assert.equal(inbox.messages(sub.token).at(-1)?.kind, 'terminated');
-  assert.equal((await post(sub, eventJson('late'))).status, 404);
+  assert.equal(inbox.messages(sub.token).at(-1)?.kind, 'terminated');  assert.equal((await post(sub, eventJson('late'))).status, 404);
 });
 
 test('unknown control type: 200 and stored for the client', async (t) => {

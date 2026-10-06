@@ -5,10 +5,13 @@ import { writeFileSync } from 'node:fs';
 import { parseArgs } from 'node:util';
 import { formatTable, runSuite } from './suite.js';
 
-const USAGE = `usage: evdock-conformance --url <callback-url> --secret <whsec_...> --subscription-id <id> [--json <report.json>]
+const USAGE = `usage: evdock-conformance --url <callback-url> --secret <whsec_...> --subscription-id <id>
+                          [--json <report.json>] [--no-handshake]
 
 Plays the MCP server: signs deliveries with the given secret and POSTs them to the URL.
 The last check sends a terminated envelope, which may end the subscription on the receiver.
+--no-handshake: the receiver proves intent by allowlist, out-of-band registration or a
+well-known document, so the verification handshake is recorded but not counted.
 Exit code: 0 conformant, 1 a MUST check failed, 2 usage error.`;
 
 async function main(): Promise<void> {
@@ -20,6 +23,7 @@ async function main(): Promise<void> {
         secret: { type: 'string' },
         'subscription-id': { type: 'string' },
         json: { type: 'string', default: 'conformance-report.json' },
+        'no-handshake': { type: 'boolean', default: false },
       },
     }));
   } catch (err) {
@@ -37,7 +41,7 @@ async function main(): Promise<void> {
 
   let report;
   try {
-    report = await runSuite({ url, secret, subscriptionId });
+    report = await runSuite({ url, secret, subscriptionId }, { handshake: !values['no-handshake'] });
   } catch (err) {
     console.error((err as Error).message);
     process.exitCode = 2;

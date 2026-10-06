@@ -151,9 +151,9 @@ export class Inbox {
           )
           .run(token, cursor, receivedAtMs);
       } else if (message.kind === 'terminated') {
-        // The subscription no longer exists server-side. The stored message is the notice for the output side.
+        // The subscription no longer exists server-side. The stored message is the notice for the
+        // output side. The cursor is kept: a resubscribe (M2) may still want the last position.
         this.db.prepare('DELETE FROM subscriptions WHERE token = ?').run(token);
-        this.db.prepare('DELETE FROM cursors WHERE token = ?').run(token);
       }
 
       this.db.exec('COMMIT');

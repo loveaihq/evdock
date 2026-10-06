@@ -1,6 +1,6 @@
 // Local plain-HTTP receiver: POST /hooks/<token>. HTTPS is the relay's job (M3).
 
-import { createServer, type IncomingMessage, type Server } from 'node:http';
+import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import type { Inbox } from './inbox.js';
 import { handleDelivery, MAX_BODY_BYTES } from './receiver.js';
 
@@ -29,6 +29,19 @@ function readBody(req: IncomingMessage): Promise<Buffer | 'too-large'> {
   });
 }
 
+// Node exposes header bytes as latin1 strings. Senders encode values as UTF-8 (the
+// signature prefix is UTF-8), so recover the wire bytes and decode them as UTF-8.
+// Repeated webhook-signature lines are one space-delimited list.
+function readHeaders(req: IncomingMessage): Record<string, string> {
+  const headers: Record<string, string> = {};
+  for (const [name, values] of Object.entries(req.headersDistinct)) {
+    if (!values) continue;
+    const joined = values.join(name === 'webhook-signature' ? ' ' : ', ');
+    headers[name] = Buffer.from(joined, 'latin1').toString('utf8');
+  }
+  return headers;
+}
+
 // webhook-id comes from an unauthenticated request; keep it printable and short in logs.
 function forLog(value: string | undefined): string {
   if (value === undefined) return '-';
@@ -39,10 +52,10 @@ export function createReceiver(options: ReceiverOptions): Server {
   const now = options.now ?? Date.now;
   const log = options.log ?? (() => {});
 
-  return createServer(async (req, res) => {
+  async function serve(req: IncomingMessage, res: ServerResponse): Promise<void> {
     const receivedAtMs = now();
-    const path = new URL(req.url ?? '/', 'http://localhost').pathname;
-    const match = HOOK_PATH.exec(path);
+    // Matched as a plain string: request targets are attacker-controlled and need not be valid URLs.
+    const match = HOOK_PATH.exec((req.url ?? '').split('?')[0]!);
     const reply = (status: number, outcome: string, json?: unknown) => {
       if (json === undefined) {
         res.writeHead(status).end();
@@ -66,14 +79,21 @@ export function createReceiver(options: ReceiverOptions): Server {
     try {
       const body = await readBody(req);
       if (body === 'too-large') return reply(413, 'too-large');
-      const headers: Record<string, string | undefined> = {};
-      for (const [name, value] of Object.entries(req.headers)) {
-        if (typeof value === 'string') headers[name] = value;
-      }
-      const result = handleDelivery(options.inbox, { token: match[1]!, headers, body, receivedAtMs });
+      const result = handleDelivery(options.inbox, {
+        token: match[1]!,
+        headers: readHeaders(req),
+        body,
+        receivedAtMs,
+      });
       reply(result.status, result.outcome, result.json);
     } catch {
       if (!res.headersSent) reply(500, 'internal-error');
     }
+  }
+
+  return createServer((req, res) => {
+    serve(req, res).catch(() => {
+      if (!res.headersSent) res.writeHead(500).end();
+    });
   });
 }

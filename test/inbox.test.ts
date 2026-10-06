@@ -87,7 +87,7 @@ test('gap stores the fresh cursor and marks a possible gap', (t) => {
   );
 });
 
-test('terminated removes the subscription and its cursor, and is kept as a message', (t) => {
+test('terminated removes the subscription, keeps the cursor, and is kept as a message', (t) => {
   const { inbox, done } = setup();
   t.after(done);
   inbox.addSubscription('a', newSecret());
@@ -95,7 +95,7 @@ test('terminated removes the subscription and its cursor, and is kept as a messa
   put(inbox, 'a', 'e1', event('e1', 'c1'));
   assert.equal(put(inbox, 'a', 'msg_terminated_1', { kind: 'terminated', code: -32012, message: 'Forbidden' }), 'stored');
   assert.equal(inbox.getSubscription('a'), undefined);
-  assert.equal(inbox.cursor('a'), undefined);
+  assert.equal(inbox.cursor('a')?.cursor, 'c1');
   assert.deepEqual(
     inbox.messages('a').map((m) => m.kind),
     ['event', 'terminated'],

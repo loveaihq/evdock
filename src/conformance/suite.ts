@@ -81,7 +81,18 @@ interface DeliveryOptions {
   omit?: string;
 }
 
-export async function runSuite(target: Target, now: () => number = Date.now): Promise<Report> {
+export interface SuiteOptions {
+  /**
+   * False when the receiver proves intent another way (server allowlist, out-of-band
+   * registration, or a well-known document): the handshake check is then recorded, not counted.
+   */
+  handshake?: boolean;
+  now?: () => number;
+}
+
+export async function runSuite(target: Target, options: SuiteOptions = {}): Promise<Report> {
+  const now = options.now ?? Date.now;
+  const handshake = options.handshake ?? true;
   const key = decodeSecret(target.secret);
   const otherKey = randomBytes(32);
   const startedAt = new Date(now()).toISOString();
@@ -129,8 +140,9 @@ export async function runSuite(target: Target, now: () => number = Date.now): Pr
     c: Omit<CaseResult, 'outcome' | 'actual'>,
     passed: boolean,
     actual = c.attempts.map(describe).join(', '),
+    counted = c.level !== 'UNSPECIFIED',
   ) {
-    const outcome: Outcome = c.level === 'UNSPECIFIED' ? 'info' : passed ? 'pass' : 'fail';
+    const outcome: Outcome = !counted ? 'info' : passed ? 'pass' : 'fail';
     results.push({ ...c, actual, outcome });
   }
 
@@ -266,10 +278,13 @@ export async function runSuite(target: Target, now: () => number = Date.now): Pr
         level: 'MUST',
         expected: '2xx with {"challenge": <same nonce>}',
         attempts: [a],
-        note: 'Applies to receivers that confirm intent by handshake (not only by allowlist or well-known document).',
+        note: handshake
+          ? 'Required of receivers that prove intent by handshake. Run with --no-handshake if this receiver uses an allowlist, out-of-band registration or a well-known document instead.'
+          : 'Recorded only (--no-handshake): the receiver proves intent another way.',
       },
       ok,
       `${describe(a)}${is2xx(a) ? (echoed === challenge ? ', challenge echoed' : ', challenge missing or wrong') : ''}`,
+      handshake,
     );
   }
 
@@ -372,6 +387,8 @@ export function formatTable(report: Report): string {
   const widths = header.map((h, col) => Math.max(h.length, ...rows.map((row) => row[col]!.length)));
   const line = (cells: string[]) => cells.map((cell, col) => cell.padEnd(widths[col]!)).join('  ').trimEnd();
   const c = report.counts;
+  const recordedOnly = Object.values(c).reduce((sum, level) => sum + level.info, 0);
+  const baselineFailed = report.results.find((r) => r.id === 'valid-event')?.outcome === 'fail';
   return [
     `Target: ${report.target}`,
     `Spec:   ${report.spec}`,
@@ -380,9 +397,15 @@ export function formatTable(report: Report): string {
     line(widths.map((w) => '-'.repeat(w))),
     ...rows.map(line),
     '',
+    'Notes:',
+    ...report.results.filter((r) => r.note).map((r) => `  ${r.id}: ${r.note}`),
+    ...(baselineFailed
+      ? ['', 'Warning: the valid-event baseline failed, so a PASS on a check that expects rejection says little.']
+      : []),
+    '',
     `MUST ${c.MUST.pass}/${c.MUST.pass + c.MUST.fail} passed, ` +
       `SHOULD ${c.SHOULD.pass}/${c.SHOULD.pass + c.SHOULD.fail}, ` +
-      `MAY ${c.MAY.pass}/${c.MAY.pass + c.MAY.fail}, recorded only ${c.UNSPECIFIED.info}`,
+      `MAY ${c.MAY.pass}/${c.MAY.pass + c.MAY.fail}, recorded only ${recordedOnly}`,
     `Conformant: ${report.conformant ? 'yes' : 'no'} (only MUST failures count)`,
   ].join('\n');
 }
