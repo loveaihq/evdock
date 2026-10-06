@@ -1,14 +1,55 @@
-// SQLite inbox: subscriptions, received messages (events and control envelopes), cursors.
+// SQLite inbox: servers, subscriptions, received messages (events and control envelopes), cursors.
 // A write returns only after the transaction commits; callers answer 2xx after that.
+// The CLI and `evdock serve` are separate processes sharing this file.
 
 import { DatabaseSync } from 'node:sqlite';
 import type { Message } from './classify.js';
+
+/**
+ * pending: path registered, events/subscribe not answered yet (verification is echoed, events get 503).
+ * active: confirmed and refreshed. stopped: refresh hit a permanent error. unsubscribed / terminated: ended.
+ */
+export type SubscriptionStatus = 'pending' | 'active' | 'stopped' | 'unsubscribed' | 'terminated';
 
 export interface Subscription {
   token: string;
   secret: string;
   /** Server-derived id from the subscribe response; null until confirmed. */
   subscriptionId: string | null;
+  status: SubscriptionStatus;
+  server: string | null;
+  eventName: string | null;
+  /** Subscription arguments as JSON text, re-sent unchanged on every refresh. */
+  arguments: string | null;
+  callbackUrl: string | null;
+  /** Epoch ms of the granted expiry; null for no expiry or not granted yet. */
+  refreshBefore: number | null;
+  /** Epoch ms when the current grant was received. */
+  grantedAt: number | null;
+  lastError: string | null;
+}
+
+export interface NewSubscription {
+  token: string;
+  secret: string;
+  server?: string;
+  eventName?: string;
+  arguments?: string;
+  callbackUrl?: string;
+}
+
+export interface Server {
+  name: string;
+  url: string;
+  /** Name of the environment variable holding the bearer token. The token itself is never stored. */
+  tokenEnv: string;
+}
+
+export interface Grant {
+  id: string;
+  refreshBefore: number | null;
+  cursor: string | null;
+  truncated: boolean;
 }
 
 /** Everything except verification, which is answered and never stored. */
@@ -43,10 +84,24 @@ export interface CursorRow {
 const SCHEMA = `
 PRAGMA journal_mode = WAL;
 PRAGMA synchronous = FULL;
+PRAGMA busy_timeout = 5000;
+CREATE TABLE IF NOT EXISTS servers (
+  name TEXT PRIMARY KEY,
+  url TEXT NOT NULL,
+  token_env TEXT NOT NULL
+) STRICT;
 CREATE TABLE IF NOT EXISTS subscriptions (
   token TEXT PRIMARY KEY,
   secret TEXT NOT NULL,
   subscription_id TEXT,
+  status TEXT NOT NULL,
+  server TEXT,
+  event_name TEXT,
+  arguments TEXT,
+  callback_url TEXT,
+  refresh_before INTEGER,
+  granted_at INTEGER,
+  last_error TEXT,
   created_at INTEGER NOT NULL
 ) STRICT;
 CREATE TABLE IF NOT EXISTS events (
@@ -71,11 +126,47 @@ CREATE TABLE IF NOT EXISTS cursors (
 ) STRICT;
 `;
 
+interface SubscriptionRow {
+  token: string;
+  secret: string;
+  subscription_id: string | null;
+  status: SubscriptionStatus;
+  server: string | null;
+  event_name: string | null;
+  arguments: string | null;
+  callback_url: string | null;
+  refresh_before: number | null;
+  granted_at: number | null;
+  last_error: string | null;
+}
+
+function toSubscription(r: SubscriptionRow): Subscription {
+  return {
+    token: r.token,
+    secret: r.secret,
+    subscriptionId: r.subscription_id,
+    status: r.status,
+    server: r.server,
+    eventName: r.event_name,
+    arguments: r.arguments,
+    callbackUrl: r.callback_url,
+    refreshBefore: r.refresh_before,
+    grantedAt: r.granted_at,
+    lastError: r.last_error,
+  };
+}
+
 export class Inbox {
   private readonly db: DatabaseSync;
 
   constructor(path: string) {
     this.db = new DatabaseSync(path);
+    // There is no migration: nothing was deployed before M2. An M1 file is refused rather than misread.
+    const columns = this.db.prepare("SELECT name FROM pragma_table_info('subscriptions')").all() as Array<{ name: string }>;
+    if (columns.length > 0 && !columns.some((c) => c.name === 'status')) {
+      this.db.close();
+      throw new Error(`${path} was created by an older evdock; delete it and start again`);
+    }
     this.db.exec(SCHEMA);
   }
 
@@ -83,24 +174,114 @@ export class Inbox {
     this.db.close();
   }
 
-  addSubscription(token: string, secret: string, nowMs = Date.now()): void {
+  addServer(server: Server): void {
     this.db
-      .prepare('INSERT INTO subscriptions (token, secret, subscription_id, created_at) VALUES (?, ?, NULL, ?)')
-      .run(token, secret, nowMs);
+      .prepare(
+        `INSERT INTO servers (name, url, token_env) VALUES (?, ?, ?)
+         ON CONFLICT (name) DO UPDATE SET url = excluded.url, token_env = excluded.token_env`,
+      )
+      .run(server.name, server.url, server.tokenEnv);
   }
 
+  getServer(name: string): Server | undefined {
+    const row = this.db.prepare('SELECT name, url, token_env FROM servers WHERE name = ?').get(name) as
+      | { name: string; url: string; token_env: string }
+      | undefined;
+    return row && { name: row.name, url: row.url, tokenEnv: row.token_env };
+  }
+
+  /** Registers a receive path as pending. */
+  addSubscription(sub: NewSubscription, nowMs = Date.now()): void {
+    this.db
+      .prepare(
+        `INSERT INTO subscriptions (token, secret, status, server, event_name, arguments, callback_url, created_at)
+         VALUES (?, ?, 'pending', ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        sub.token,
+        sub.secret,
+        sub.server ?? null,
+        sub.eventName ?? null,
+        sub.arguments ?? null,
+        sub.callbackUrl ?? null,
+        nowMs,
+      );
+  }
+
+  /** Marks a path active under the server-derived id, without a grant (tests and hand-registered paths). */
   confirmSubscription(token: string, subscriptionId: string): void {
     const result = this.db
-      .prepare('UPDATE subscriptions SET subscription_id = ? WHERE token = ?')
+      .prepare("UPDATE subscriptions SET subscription_id = ?, status = 'active' WHERE token = ?")
       .run(subscriptionId, token);
     if (result.changes === 0) throw new Error('no subscription registered at that path');
   }
 
+  /**
+   * Records a subscribe/refresh response: the subscription becomes active under the returned id,
+   * a non-null cursor is saved, and truncated marks a possible gap. Ignored (returns false) if the
+   * subscription ended meanwhile, e.g. a terminated envelope arrived during the call.
+   */
+  applyGrant(token: string, grant: Grant, nowMs = Date.now()): boolean {
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      const updated = this.db
+        .prepare(
+          `UPDATE subscriptions SET subscription_id = ?, status = 'active', refresh_before = ?, granted_at = ?,
+             last_error = NULL
+           WHERE token = ? AND status IN ('pending', 'active')`,
+        )
+        .run(grant.id, grant.refreshBefore, nowMs, token);
+      if (updated.changes > 0 && (grant.cursor !== null || grant.truncated)) {
+        this.db
+          .prepare(
+            `INSERT INTO cursors (token, cursor, possible_gap, updated_at) VALUES (?, ?, ?, ?)
+             ON CONFLICT (token) DO UPDATE SET cursor = coalesce(excluded.cursor, cursors.cursor),
+               possible_gap = max(cursors.possible_gap, excluded.possible_gap), updated_at = excluded.updated_at`,
+          )
+          .run(token, grant.cursor, grant.truncated ? 1 : 0, nowMs);
+      }
+      this.db.exec('COMMIT');
+      return updated.changes > 0;
+    } catch (err) {
+      try {
+        this.db.exec('ROLLBACK');
+      } catch {
+        // Already rolled back.
+      }
+      throw err;
+    }
+  }
+
+  setStatus(token: string, status: SubscriptionStatus, lastError: string | null = null): void {
+    this.db.prepare('UPDATE subscriptions SET status = ?, last_error = ? WHERE token = ?').run(status, lastError, token);
+  }
+
+  /** Notes a failed refresh without changing the status. */
+  recordError(token: string, lastError: string): void {
+    this.db.prepare('UPDATE subscriptions SET last_error = ? WHERE token = ?').run(lastError, token);
+  }
+
+  /** Removes a path that never became a subscription (events/subscribe failed). */
+  deleteSubscription(token: string): void {
+    this.db.prepare('DELETE FROM subscriptions WHERE token = ?').run(token);
+  }
+
   getSubscription(token: string): Subscription | undefined {
+    const row = this.db.prepare('SELECT * FROM subscriptions WHERE token = ?').get(token) as SubscriptionRow | undefined;
+    return row && toSubscription(row);
+  }
+
+  /** Finds a subscription by path token or by server-derived id. */
+  findSubscription(ref: string): Subscription | undefined {
     const row = this.db
-      .prepare('SELECT token, secret, subscription_id FROM subscriptions WHERE token = ?')
-      .get(token) as { token: string; secret: string; subscription_id: string | null } | undefined;
-    return row && { token: row.token, secret: row.secret, subscriptionId: row.subscription_id };
+      .prepare('SELECT * FROM subscriptions WHERE token = ? OR subscription_id = ? ORDER BY created_at DESC LIMIT 1')
+      .get(ref, ref) as SubscriptionRow | undefined;
+    return row && toSubscription(row);
+  }
+
+  listSubscriptions(): Subscription[] {
+    const rows = this.db.prepare('SELECT * FROM subscriptions ORDER BY created_at').all() as unknown as SubscriptionRow[];
+    return rows.map(toSubscription);
   }
 
   /** Stores one delivery. Dedup is per (path token, webhook-id). */
@@ -151,9 +332,12 @@ export class Inbox {
           )
           .run(token, cursor, receivedAtMs);
       } else if (message.kind === 'terminated') {
-        // The subscription no longer exists server-side. The stored message is the notice for the
-        // output side. The cursor is kept: a resubscribe (M2) may still want the last position.
-        this.db.prepare('DELETE FROM subscriptions WHERE token = ?').run(token);
+        // The subscription no longer exists server-side: stop refreshing it. The row stays so the
+        // reason can be seen and the subscription re-created; the stored message is the notice for
+        // the output side; the cursor is kept for a resubscribe.
+        this.db
+          .prepare("UPDATE subscriptions SET status = 'terminated', last_error = ? WHERE token = ?")
+          .run(`terminated: ${message.code} ${message.message}`.slice(0, 200), token);
       }
 
       this.db.exec('COMMIT');

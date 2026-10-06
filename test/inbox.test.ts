@@ -31,16 +31,52 @@ function put(inbox: Inbox, token: string, webhookId: string, message: StoredMess
   return inbox.store({ token, subscriptionId: `sub_${token}`, webhookId, message, body: Buffer.from('{}'), receivedAtMs: 1 });
 }
 
-test('subscriptions: unconfirmed until the server id is recorded', (t) => {
+test('subscriptions: pending until the server id is recorded', (t) => {
   const { inbox, done } = setup();
   t.after(done);
   const secret = newSecret();
-  inbox.addSubscription('tok', secret);
-  assert.deepEqual(inbox.getSubscription('tok'), { token: 'tok', secret, subscriptionId: null });
+  inbox.addSubscription({ token: 'tok', secret });
+  const pending = inbox.getSubscription('tok');
+  assert.equal(pending?.secret, secret);
+  assert.equal(pending?.subscriptionId, null);
+  assert.equal(pending?.status, 'pending');
   inbox.confirmSubscription('tok', 'sub_1');
   assert.equal(inbox.getSubscription('tok')?.subscriptionId, 'sub_1');
+  assert.equal(inbox.getSubscription('tok')?.status, 'active');
   assert.equal(inbox.getSubscription('other'), undefined);
   assert.throws(() => inbox.confirmSubscription('other', 'sub_2'));
+});
+
+test('applyGrant activates, saves a non-null cursor, marks truncated, and ignores ended subscriptions', (t) => {
+  const { inbox, done } = setup();
+  t.after(done);
+  inbox.addSubscription({ token: 'a', secret: newSecret(), server: 's', eventName: 'e', arguments: '{}', callbackUrl: 'u' });
+  assert.equal(inbox.applyGrant('a', { id: 'sub_a', refreshBefore: 5000, cursor: 'c1', truncated: false }, 1000), true);
+  let sub = inbox.getSubscription('a');
+  assert.equal(sub?.status, 'active');
+  assert.equal(sub?.subscriptionId, 'sub_a');
+  assert.equal(sub?.refreshBefore, 5000);
+  assert.equal(sub?.grantedAt, 1000);
+  assert.deepEqual(inbox.cursor('a'), { cursor: 'c1', possibleGap: false });
+
+  inbox.applyGrant('a', { id: 'sub_a', refreshBefore: 9000, cursor: null, truncated: true }, 2000);
+  assert.deepEqual(inbox.cursor('a'), { cursor: 'c1', possibleGap: true }, 'null cursor kept the saved one');
+
+  inbox.setStatus('a', 'terminated', 'gone');
+  assert.equal(inbox.applyGrant('a', { id: 'sub_a', refreshBefore: 9999, cursor: 'c2', truncated: false }, 3000), false);
+  sub = inbox.getSubscription('a');
+  assert.equal(sub?.status, 'terminated');
+  assert.equal(inbox.cursor('a')?.cursor, 'c1');
+});
+
+test('servers: stored by name with the token variable name only', (t) => {
+  const { inbox, done } = setup();
+  t.after(done);
+  inbox.addServer({ name: 'mock', url: 'http://x/mcp', tokenEnv: 'MOCK_TOKEN' });
+  assert.deepEqual(inbox.getServer('mock'), { name: 'mock', url: 'http://x/mcp', tokenEnv: 'MOCK_TOKEN' });
+  inbox.addServer({ name: 'mock', url: 'http://y/mcp', tokenEnv: 'MOCK_TOKEN' });
+  assert.equal(inbox.getServer('mock')?.url, 'http://y/mcp');
+  assert.equal(inbox.getServer('other'), undefined);
 });
 
 test('a repeated webhook-id on the same path is stored once', (t) => {
@@ -87,14 +123,15 @@ test('gap stores the fresh cursor and marks a possible gap', (t) => {
   );
 });
 
-test('terminated removes the subscription, keeps the cursor, and is kept as a message', (t) => {
+test('terminated marks the subscription, keeps the cursor, and is kept as a message', (t) => {
   const { inbox, done } = setup();
   t.after(done);
-  inbox.addSubscription('a', newSecret());
+  inbox.addSubscription({ token: 'a', secret: newSecret() });
   inbox.confirmSubscription('a', 'sub_a');
   put(inbox, 'a', 'e1', event('e1', 'c1'));
   assert.equal(put(inbox, 'a', 'msg_terminated_1', { kind: 'terminated', code: -32012, message: 'Forbidden' }), 'stored');
-  assert.equal(inbox.getSubscription('a'), undefined);
+  assert.equal(inbox.getSubscription('a')?.status, 'terminated');
+  assert.match(inbox.getSubscription('a')?.lastError ?? '', /-32012 Forbidden/);
   assert.equal(inbox.cursor('a')?.cursor, 'c1');
   assert.deepEqual(
     inbox.messages('a').map((m) => m.kind),
@@ -107,7 +144,7 @@ test('stored messages survive closing and reopening the database', () => {
   try {
     const path = join(dir, 'inbox.db');
     const first = new Inbox(path);
-    first.addSubscription('a', newSecret());
+    first.addSubscription({ token: 'a', secret: newSecret() });
     put(first, 'a', 'e1', event('e1', 'c1'));
     first.close();
     const second = new Inbox(path);

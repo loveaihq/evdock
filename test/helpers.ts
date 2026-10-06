@@ -5,6 +5,7 @@ import type { AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Webhook } from 'standardwebhooks';
+import type { Subscription } from '../src/inbox.js';
 
 export function newSecret(bytes = 32): string {
   return `whsec_${randomBytes(bytes).toString('base64')}`;
@@ -34,4 +35,21 @@ export async function close(server: Server): Promise<void> {
 /** Signs with the official standardwebhooks library, independent of src/signature.ts. */
 export function officialSign(secret: string, id: string, timestampSeconds: number, body: string): string {
   return new Webhook(secret).sign(id, new Date(timestampSeconds * 1000), body);
+}
+
+/** A confirmed subscription row, for stubs that bypass the inbox. */
+export function activeSubscription(token: string, secret: string): Subscription {
+  return {
+    token,
+    secret,
+    subscriptionId: 'sub_test',
+    status: 'active',
+    server: null,
+    eventName: null,
+    arguments: null,
+    callbackUrl: null,
+    refreshBefore: null,
+    grantedAt: null,
+    lastError: null,
+  };
 }

@@ -21,7 +21,7 @@ test('evdock passes every check, including SHOULD and MAY', async (t) => {
   });
   const token = newToken();
   const secret = newSecret();
-  inbox.addSubscription(token, secret);
+  inbox.addSubscription({ token, secret });
   inbox.confirmSubscription(token, 'sub_conformance');
 
   const report = await runSuite({ url: `${base}/hooks/${token}`, secret, subscriptionId: 'sub_conformance' });
@@ -109,7 +109,7 @@ test('a receiver that proves intent without the handshake passes with handshake:
   const freshTarget = () => {
     const token = newToken();
     const secret = newSecret();
-    inbox.addSubscription(token, secret);
+    inbox.addSubscription({ token, secret });
     inbox.confirmSubscription(token, 'sub_x');
     return { url: `${base}/hooks/${token}`, secret, subscriptionId: 'sub_x' };
   };

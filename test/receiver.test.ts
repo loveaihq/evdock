@@ -6,7 +6,7 @@ import { test } from 'node:test';
 import { createReceiver } from '../src/http.js';
 import { Inbox } from '../src/inbox.js';
 import { handleDelivery, MAX_BODY_BYTES } from '../src/receiver.js';
-import { close, listen, newSecret, newToken, officialSign, tempDir } from './helpers.js';
+import { activeSubscription, close, listen, newSecret, newToken, officialSign, tempDir } from './helpers.js';
 
 const NOW_MS = Date.UTC(2026, 9, 6, 12, 0, 0);
 const NOW = NOW_MS / 1000;
@@ -26,7 +26,7 @@ async function setup(t: { after: (fn: () => Promise<void> | void) => void }) {
   function register(confirmedAs: string | null = 'sub_test') {
     const token = newToken();
     const secret = newSecret();
-    inbox.addSubscription(token, secret);
+    inbox.addSubscription({ token, secret });
     if (confirmedAs !== null) inbox.confirmSubscription(token, confirmedAs);
     return { token, secret, url: `${base}/hooks/${token}`, subscriptionId: confirmedAs ?? 'sub_pending' };
   }
@@ -298,7 +298,7 @@ test('terminated: 200, subscription removed, later deliveries get 404', async (t
   const sub = register();
   const body = JSON.stringify({ type: 'terminated', error: { code: -32012, message: 'Forbidden', data: { reason: 'Access revoked' } } });
   assert.equal((await post(sub, body, { id: 'msg_terminated_1' })).status, 200);
-  assert.equal(inbox.getSubscription(sub.token), undefined);
+  assert.equal(inbox.getSubscription(sub.token)?.status, 'terminated');
   assert.equal(inbox.messages(sub.token).at(-1)?.kind, 'terminated');
   assert.equal((await post(sub, eventJson('late'))).status, 404);
 });
@@ -315,7 +315,7 @@ test('write failure: 503 so the server retries', () => {
   const body = eventJson('evt_w');
   const result = handleDelivery(
     {
-      getSubscription: (token) => ({ token, secret, subscriptionId: 'sub_w' }),
+      getSubscription: (token) => ({ ...activeSubscription(token, secret), subscriptionId: 'sub_w' }),
       store: () => {
         throw new Error('disk full');
       },

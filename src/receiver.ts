@@ -39,7 +39,10 @@ export function handleDelivery(
   } catch {
     return { status: 503, outcome: 'inbox-unavailable' };
   }
-  if (!subscription) return { status: 404, outcome: 'unknown-path' };
+  // Ended subscriptions (stopped, unsubscribed, terminated) are no longer receive paths.
+  if (!subscription || (subscription.status !== 'pending' && subscription.status !== 'active')) {
+    return { status: 404, outcome: 'unknown-path' };
+  }
 
   for (const name of REQUIRED_HEADERS) {
     if (!req.headers[name]) return { status: 400, outcome: `missing-${name}` };
@@ -75,7 +78,9 @@ export function handleDelivery(
   }
 
   // Both are "an id this path has not been told to route": retryable, per the spec's 503/425.
-  if (subscription.subscriptionId === null) return { status: 503, outcome: 'unconfirmed' };
+  if (subscription.status === 'pending' || subscription.subscriptionId === null) {
+    return { status: 503, outcome: 'unconfirmed' };
+  }
   if (subscriptionIdHeader !== subscription.subscriptionId) {
     return { status: 503, outcome: 'subscription-id-mismatch' };
   }
