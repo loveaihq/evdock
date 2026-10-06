@@ -6,3 +6,6 @@ dist/
 
 # OpenAI docs are not openly licensed: keep the snapshot local, never commit it
 docs/spec/openai-*
+
+# Claude Code worktrees for subagents
+.claude/worktrees/
