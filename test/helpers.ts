@@ -1,6 +1,6 @@
 import { randomBytes } from 'node:crypto';
 import { mkdtempSync, rmSync } from 'node:fs';
-import type { Server } from 'node:http';
+import { request, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -18,7 +18,8 @@ export function newToken(): string {
 /** A temp directory removed by the returned cleanup. */
 export function tempDir(): { dir: string; cleanup: () => void } {
   const dir = mkdtempSync(join(tmpdir(), 'evdock-test-'));
-  return { dir, cleanup: () => rmSync(dir, { recursive: true, force: true }) };
+  // Retries: on Windows a just-stopped child process (workerd) can hold its files for a moment.
+  return { dir, cleanup: () => rmSync(dir, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 }) };
 }
 
 export async function listen(server: Server): Promise<string> {
@@ -52,4 +53,20 @@ export function activeSubscription(token: string, secret: string): Subscription 
     grantedAt: null,
     lastError: null,
   };
+}
+
+/**
+ * POSTs to a relay hook with node:http, which (unlike fetch) can send repeated header lines and
+ * raw latin1 header bytes. The body is a Buffer: with a string body node:http writes the headers
+ * in the body's encoding.
+ */
+export function rawHook(relayUrl: string, token: string, headers: Record<string, string | string[]>, body = '{"eventId":"e"}') {
+  return new Promise<number>((resolve, reject) => {
+    const req = request(`${relayUrl}/hooks/${token}`, { method: 'POST', headers: { 'content-type': 'application/json', ...headers } }, (res) => {
+      res.resume();
+      resolve(res.statusCode!);
+    });
+    req.on('error', reject);
+    req.end(Buffer.from(body));
+  });
 }

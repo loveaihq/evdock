@@ -140,7 +140,22 @@ export async function subscribe(ctx: Context, req: NewSubscriptionRequest): Prom
   ctx.inbox.applyGrant(token, result, ctx.now());
   const sub = ctx.inbox.getSubscription(token)!;
   report(ctx, sub, result);
-  await confirmPath(ctx, sub);
+  // Until confirmed, the relay answers events 503 and the server's retries run down; the next
+  // chance after this is the first refresh. So try a few times now.
+  if (ctx.relay?.carries(sub)) {
+    for (let attempt = 1; ; attempt++) {
+      try {
+        await ctx.relay.setPath(token, 'confirmed');
+        break;
+      } catch (err) {
+        if (attempt === 3) {
+          ctx.log(`WARNING could not confirm ${label(sub)} on the relay (${(err as Error).message}); events get 503 until the next refresh confirms it`);
+          break;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 1000 * attempt));
+      }
+    }
+  }
   return sub;
 }
 

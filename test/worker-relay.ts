@@ -69,6 +69,8 @@ export async function startWorkerRelay(options: WorkerRelayOptions): Promise<Wor
       ...process.env,
       // Not --var: wrangler prints the values of vars on startup, and secrets as "(hidden)".
       RELAY_KEY: options.key,
+      // Without a `secrets` declaration in wrangler.jsonc, wrangler dev only reads it from here with this.
+      CLOUDFLARE_INCLUDE_PROCESS_ENV: 'true',
       WRANGLER_SEND_METRICS: 'false',
       // No network: the banner's npm update check and Miniflare's download of request.cf data.
       WRANGLER_HIDE_BANNER: 'true',

@@ -7,7 +7,7 @@ import { parseArgs } from 'node:util';
 import { startDaemon } from './daemon.js';
 import { describeError, listEvents } from './events-api.js';
 import { Inbox } from './inbox.js';
-import { relayFromInbox } from './relay-client.js';
+import { liveOn, relayFromInbox } from './relay-client.js';
 import { startRelayServer } from './relay/node.js';
 import { printable } from './text.js';
 import { clientFromEnv, connect, label, subscribe, unsubscribe, type Context } from './subscriptions.js';
@@ -41,14 +41,29 @@ const OPTIONS = {
 
 class UsageError extends Error {}
 
-function context(dbPath: string): Context {
+/** Opens the database; `withRelay` also loads the relay (and so needs its key in the environment). */
+function context(dbPath: string, withRelay: boolean): Context {
   const inbox = new Inbox(dbPath);
   try {
-    return { inbox, client: clientFromEnv, now: Date.now, log: (line) => console.log(line), relay: relayFromInbox(inbox) };
+    const relay = withRelay ? relayFromInbox(inbox) : undefined;
+    return { inbox, client: clientFromEnv, now: Date.now, log: (line) => console.log(line), relay };
   } catch (err) {
     inbox.close();
     throw err;
   }
+}
+
+/** Refuses to move the relay setting away from subscriptions that still receive through it. */
+function assertNoneOn(inbox: Inbox, action: string): void {
+  const current = inbox.getRelay();
+  if (!current) return;
+  const live = liveOn(inbox, current.url);
+  if (live.length === 0) return;
+  inbox.close();
+  throw new Error(
+    `${live.length} subscription(s) still receive through ${current.url}: ${live.map(label).join(', ')}\n` +
+      `${action} would leave them delivering to a relay nobody fetches from. Unsubscribe them first.`,
+  );
 }
 
 function parseJsonObject(text: string): Record<string, unknown> {
@@ -92,7 +107,11 @@ async function main(argv: string[]): Promise<void> {
     if (!keyEnv) throw new UsageError('relay use needs --key-env');
     const url = rest[1].replace(/\/+$/, '');
     if (!/^https?:\/\//.test(url)) throw new UsageError('relay url must start with https:// (or http:// for local testing)');
+    if (url.startsWith('http://') && !/^http:\/\/(127\.0\.0\.1|localhost|\[::1\])(:|$)/.test(url)) {
+      console.log('warning: plain http to a remote relay sends the relay key and events unencrypted');
+    }
     const inbox = new Inbox(values.db);
+    if (inbox.getRelay()?.url !== url) assertNoneOn(inbox, 'Switching relays');
     inbox.setRelay({ url, keyEnv });
     inbox.close();
     console.log(`relay ${url} (key from $${keyEnv}); new subscriptions will use it`);
@@ -101,9 +120,10 @@ async function main(argv: string[]): Promise<void> {
 
   if (command === 'relay' && rest[0] === 'clear') {
     const inbox = new Inbox(values.db);
+    assertNoneOn(inbox, 'Clearing the relay');
     inbox.setRelay(undefined);
     inbox.close();
-    console.log('relay cleared; subscriptions already on it stop receiving until re-created');
+    console.log('relay cleared; new subscriptions will call back to --callback-base');
     return;
   }
 
@@ -131,7 +151,7 @@ async function main(argv: string[]): Promise<void> {
   }
 
   if (command === 'events' && rest[0]) {
-    const ctx = context(values.db);
+    const ctx = context(values.db, false);
     try {
       const events = await listEvents(await connect(ctx, rest[0]));
       for (const e of events) {
@@ -148,7 +168,7 @@ async function main(argv: string[]): Promise<void> {
   }
 
   if (command === 'subscribe' && rest[0] && rest[1]) {
-    const ctx = context(values.db);
+    const ctx = context(values.db, true);
     try {
       const sub = await subscribe(ctx, {
         server: rest[0],
@@ -166,7 +186,7 @@ async function main(argv: string[]): Promise<void> {
   }
 
   if (command === 'unsubscribe' && rest[0]) {
-    const ctx = context(values.db);
+    const ctx = context(values.db, true);
     try {
       const sub = ctx.inbox.findSubscription(rest[0]);
       if (!sub) throw new UsageError(`no subscription ${rest[0]}`);

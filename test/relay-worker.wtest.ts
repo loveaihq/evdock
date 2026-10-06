@@ -10,7 +10,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { after, before, test } from 'node:test';
 import { MAX_BODY_BYTES } from '../src/relay/core.js';
-import { newToken } from './helpers.js';
+import { newToken, rawHook } from './helpers.js';
 import { startWorkerRelay, type WorkerRelay } from './worker-relay.js';
 
 const KEY = 'relay-key-for-worker-tests';
@@ -180,6 +180,22 @@ test('missing required header: 400; body over 256 KiB: 413 by Content-Length or 
   await until('relay log lines', () => output().includes('webhook-id=too-long-chunked'));
   assert.match(output(), /^413 too-large hook=\S+ webhook-id=too-long$/m);
   assert.match(output(), /^413 too-large hook=\S+ webhook-id=too-long-chunked$/m);
+});
+
+test('header values as the sender meant them: UTF-8 webhook-id, repeated signature lines as one list', async () => {
+  await drain();
+  const token = await register();
+  const status = await rawHook(relay.url, token, {
+    'webhook-id': Buffer.from('évt_日本_1', 'utf8').toString('latin1'), // node:http writes header strings as latin1 bytes
+    'webhook-timestamp': String(NOW / 1000),
+    'webhook-signature': ['v1,AAAA', 'v1,BBBB'],
+    'x-mcp-subscription-id': 'sub_1',
+  });
+  assert.equal(status, 200);
+  const [d] = (await fetched()).deliveries;
+  assert.equal(d!.headers['webhook-id'], 'évt_日本_1');
+  assert.equal(d!.headers['webhook-signature'], 'v1,AAAA v1,BBBB');
+  await drain();
 });
 
 test('fetching is batched by count and by bytes', async () => {

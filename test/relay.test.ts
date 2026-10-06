@@ -3,7 +3,7 @@ import { join } from 'node:path';
 import { test } from 'node:test';
 import { MAX_BODY_BYTES, MAX_STORED_DELIVERIES, RelayStore } from '../src/relay/core.js';
 import { nodeSql, startRelayServer } from '../src/relay/node.js';
-import { newToken, tempDir } from './helpers.js';
+import { newToken, rawHook, tempDir } from './helpers.js';
 
 const KEY = 'relay-key-for-tests';
 const NOW = Date.UTC(2026, 9, 6, 12, 0, 0);
@@ -47,6 +47,7 @@ async function setup(t: { after: (fn: () => Promise<void> | void) => void }) {
     more: boolean;
   };
   return {
+    url: () => relay.url,
     logs,
     control,
     register,
@@ -130,6 +131,29 @@ test('missing required header: 400; body over 256 KiB: 413 by Content-Length or 
   assert.equal((await r.hook(token, chunked)).status, 413);
   assert.equal((await r.hook(token, new Uint8Array(MAX_BODY_BYTES))).status, 200);
   assert.equal((await r.fetched()).deliveries.length, 1);
+});
+
+test('oversized bodies: 413 while at most 1 MiB is left unread; beyond that the connection is cut, not drained without end', async (t) => {
+  const r = await setup(t);
+  const token = await r.register();
+  assert.equal((await r.hook(token, new Uint8Array(MAX_BODY_BYTES + 600 * 1024))).status, 413);
+  await assert.rejects(r.hook(token, new Uint8Array(3 * 1024 * 1024)), 'cut off');
+  assert.equal((await r.hook(token, '{"after":1}')).status, 200, 'still serving');
+});
+
+test('header values as the sender meant them: UTF-8 webhook-id, repeated signature lines as one list', async (t) => {
+  const r = await setup(t);
+  const token = await r.register();
+  const status = await rawHook(r.url(), token, {
+    'webhook-id': Buffer.from('évt_日本_1', 'utf8').toString('latin1'), // node:http writes header strings as latin1 bytes
+    'webhook-timestamp': String(NOW / 1000),
+    'webhook-signature': ['v1,AAAA', 'v1,BBBB'],
+    'x-mcp-subscription-id': 'sub_1',
+  });
+  assert.equal(status, 200);
+  const [d] = (await r.fetched()).deliveries;
+  assert.equal(d!.headers['webhook-id'], 'évt_日本_1');
+  assert.equal(d!.headers['webhook-signature'], 'v1,AAAA v1,BBBB');
 });
 
 test('fetching is batched by count and by bytes', async (t) => {

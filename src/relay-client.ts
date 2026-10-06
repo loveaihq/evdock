@@ -84,6 +84,18 @@ export class RelayClient {
   }
 }
 
+/**
+ * Subscriptions still receiving through the relay at `relayUrl`. Switching relays away from
+ * under them would lose events silently: the server keeps delivering there and getting 2xx,
+ * but nobody fetches any more.
+ */
+export function liveOn(inbox: Inbox, relayUrl: string): Subscription[] {
+  const prefix = `${relayUrl.replace(/\/+$/, '')}/hooks/`;
+  return inbox
+    .listSubscriptions()
+    .filter((s) => (s.status === 'active' || s.status === 'pending') && s.callbackUrl?.startsWith(prefix) === true);
+}
+
 /** The configured relay with its key from the environment, or undefined when none is configured. */
 export function relayFromInbox(inbox: Inbox): RelayClient | undefined {
   const setting = inbox.getRelay();

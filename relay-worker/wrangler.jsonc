@@ -11,9 +11,11 @@
 	},
 	// The free plan only has SQLite-backed Durable Objects.
 	"migrations": [{ "tag": "v1", "new_sqlite_classes": ["Relay"] }],
-	// The relay key. Deployed: `wrangler secret put RELAY_KEY`. Local: a gitignored .dev.vars
-	// next to this file, or RELAY_KEY in the environment wrangler runs in.
-	"secrets": { "required": ["RELAY_KEY"] },
+	// The relay key RELAY_KEY is a secret, deliberately not declared here: with `secrets.required`
+	// the first `wrangler deploy` refuses to run before the Worker exists, and the secret cannot
+	// be put before it exists either. Deploy, then `wrangler secret put RELAY_KEY`; until then the
+	// relay answers 500. Local: a gitignored .dev.vars next to this file, or the environment
+	// (test/worker-relay.ts).
 	// No usage data to Cloudflare from wrangler runs on this project (types, dev, deploy).
 	"send_metrics": false
 }

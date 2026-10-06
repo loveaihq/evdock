@@ -22,7 +22,7 @@ export const MAX_BODY_BYTES = 256 * 1024;
 export const MAX_STORED_DELIVERIES = 10_000;
 export const MAX_STORED_BYTES = 200 * 1024 * 1024;
 const BATCH_COUNT = 20;
-// Bounds one fetch's base64 work, so it stays well inside a Worker's CPU budget.
+// Bounds the size of one fetch response and its base64 work.
 const BATCH_BYTES = 512 * 1024;
 // Verification envelopes are tiny; bodies above this are never parsed here.
 const MAX_VERIFICATION_BYTES = 4096;
@@ -86,20 +86,23 @@ export class RelayStore {
 
   /** Stores one delivery. Returns its sequence number, or 'full' when the storage cap is reached. */
   insert(token: string, receivedAt: number, headers: Record<string, string>, body: Uint8Array): number | 'full' {
+    const headerText = JSON.stringify(headers);
+    // Headers count towards the cap too: they can be large (up to 128 KB on Cloudflare).
+    const size = body.length + headerText.length;
     return this.sql.transaction(() => {
       const totals = this.sql.exec('SELECT count, bytes FROM totals WHERE id = 1')[0]!;
-      if ((totals.count as number) >= MAX_STORED_DELIVERIES || (totals.bytes as number) + body.length > MAX_STORED_BYTES) {
+      if ((totals.count as number) >= MAX_STORED_DELIVERIES || (totals.bytes as number) + size > MAX_STORED_BYTES) {
         return 'full' as const;
       }
       const row = this.sql.exec(
         'INSERT INTO deliveries (token, received_at, headers, body, size) VALUES (?, ?, ?, ?, ?) RETURNING seq',
         token,
         receivedAt,
-        JSON.stringify(headers),
+        headerText,
         body,
-        body.length,
+        size,
       )[0]!;
-      this.sql.exec('UPDATE totals SET count = count + 1, bytes = bytes + ? WHERE id = 1', body.length);
+      this.sql.exec('UPDATE totals SET count = count + 1, bytes = bytes + ? WHERE id = 1', size);
       return row.seq as number;
     });
   }
@@ -145,9 +148,25 @@ export interface RelayOptions {
 }
 
 function base64(bytes: Uint8Array): string {
+  // Native where the runtime has it; otherwise apply() over chunks (spreading a typed array
+  // goes through its iterator and is several times slower).
+  const native = (bytes as Uint8Array & { toBase64?: () => string }).toBase64;
+  if (typeof native === 'function') return native.call(bytes);
   let binary = '';
-  for (let i = 0; i < bytes.length; i += 0x8000) binary += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+  for (let i = 0; i < bytes.length; i += 0x8000) {
+    binary += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000) as unknown as number[]);
+  }
   return btoa(binary);
+}
+
+/** Header values as the sender meant them. Runtimes that hand out raw latin1 bytes supply their own. */
+export type HeaderReader = (name: string) => string | null;
+
+// Several webhook-signature header lines arrive joined with ", " (HTTP field combination), which
+// would glue a comma onto all but the last signature. Entries are `v<n>,<base64>` and base64 has
+// no commas, so ", v1,…" can only be a boundary: make it the space Standard Webhooks uses.
+function signatureList(value: string): string {
+  return value.replace(/,\s*(?=v\d+[a-z]*,)/g, ' ');
 }
 
 async function sha256(text: string): Promise<Uint8Array> {
@@ -206,18 +225,21 @@ const json = (status: number, value: unknown) =>
   new Response(JSON.stringify(value), { status, headers: { 'content-type': 'application/json' } });
 const empty = (status: number) => new Response(null, { status });
 
-export function createRelay(store: RelayStore, options: RelayOptions): (request: Request) => Promise<Response> {
+export function createRelay(
+  store: RelayStore,
+  options: RelayOptions,
+): (request: Request, header?: HeaderReader) => Promise<Response> {
   const now = options.now ?? Date.now;
   const log = options.log ?? (() => {});
 
   // POST /hooks/<token>: from MCP servers, public.
-  async function hook(request: Request, token: string, receivedAt: number): Promise<[Response, string]> {
+  async function hook(request: Request, header: HeaderReader, token: string, receivedAt: number): Promise<[Response, string]> {
     const state = store.pathState(token);
     if (state === undefined) return [empty(404), 'unknown-path'];
     const length = Number(request.headers.get('content-length') ?? NaN);
     if (length > MAX_BODY_BYTES) return [empty(413), 'too-large'];
     for (const name of REQUIRED_HEADERS) {
-      if (!request.headers.get(name)) return [empty(400), `missing-${name}`];
+      if (!header(name)) return [empty(400), `missing-${name}`];
     }
     const body = await readCapped(request, MAX_BODY_BYTES);
     if (body === 'too-large') return [empty(413), 'too-large'];
@@ -230,8 +252,10 @@ export function createRelay(store: RelayStore, options: RelayOptions): (request:
     // Registered but the subscribe response has not arrived yet: retryable (SEP-3415 538).
     if (state === 'pending') return [empty(503), 'unconfirmed'];
 
+    // Stored as the sender meant them: the daemon verifies the signature over these exact values.
     const headers: Record<string, string> = {};
-    for (const name of REQUIRED_HEADERS) headers[name] = request.headers.get(name)!;
+    for (const name of REQUIRED_HEADERS) headers[name] = header(name)!;
+    headers['webhook-signature'] = signatureList(headers['webhook-signature']!);
     let seq;
     try {
       seq = store.insert(token, receivedAt, headers, body);
@@ -277,14 +301,14 @@ export function createRelay(store: RelayStore, options: RelayOptions): (request:
     return [empty(404), 'not-found'];
   }
 
-  return async (request) => {
+  return async (request, header = (name) => request.headers.get(name)) => {
     const receivedAt = now();
     const path = new URL(request.url).pathname;
     const hookMatch = /^\/hooks\/([A-Za-z0-9_-]+)$/.exec(path);
     let response: Response;
     let outcome: string;
     if (hookMatch && request.method === 'POST') {
-      [response, outcome] = await hook(request, hookMatch[1]!, receivedAt);
+      [response, outcome] = await hook(request, header, hookMatch[1]!, receivedAt);
     } else if (path.startsWith('/relay/')) {
       [response, outcome] = await control(request, path);
     } else {
@@ -292,7 +316,7 @@ export function createRelay(store: RelayStore, options: RelayOptions): (request:
     }
     // Never the body, never the key, never a full path token.
     const label = hookMatch ? `${hookMatch[1]!.slice(0, 6)}…` : '-';
-    log(`${response.status} ${outcome} hook=${label} webhook-id=${printable(request.headers.get('webhook-id') ?? '-', 80)}`);
+    log(`${response.status} ${outcome} hook=${label} webhook-id=${printable(header('webhook-id') ?? '-', 80)}`);
     return response;
   };
 }

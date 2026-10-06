@@ -38,6 +38,9 @@ export class Relay extends DurableObject<Env> {
 
 export default {
   async fetch(request, env): Promise<Response> {
+    // Everything else is noise: answer it here without spending a Durable Object request.
+    const { pathname } = new URL(request.url);
+    if (!pathname.startsWith('/hooks/') && !pathname.startsWith('/relay/')) return new Response(null, { status: 404 });
     const relay = env.RELAY.get(env.RELAY.idFromName('relay'));
     // Answer only with the object's response: its output gate holds that response until the
     // delivery is durably stored, so no 2xx goes out for a write that could still be lost.

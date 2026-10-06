@@ -32,7 +32,7 @@ node -e "console.log(require('crypto').randomBytes(32).toString('base64url'))"
    ```bash
    npx wrangler deploy -c relay-worker/wrangler.jsonc
    ```
-   部署成功后会打印地址，形如 `https://evdock-relay.<你的子域>.workers.dev`。
+   部署成功后会打印地址，形如 `https://evdock-relay.<你的子域>.workers.dev`。在下一步设好密钥之前，中继对所有请求都回 500。
 4. 设置中继密钥。按提示粘贴，密钥不会出现在命令行历史里：
    ```bash
    npx wrangler secret put RELAY_KEY -c relay-worker/wrangler.jsonc
@@ -68,8 +68,8 @@ EVDOCK_RELAY_KEY=<中继密钥> evdock serve
 
 - 此后 `evdock subscribe` 默认把回调地址设在中继上，并在中继登记这条路径。
 - `serve` 每 5 秒取一次；有积压时连续取，直到取完。
-- 中继暂存的投递，守护进程处理完才会确认删除。守护进程离线多久都不会丢，前提是中继的存储没满（1 万条或 200 MB，满了中继回 503，服务端会重试）。
-- `evdock relay clear` 取消中继。已有的订阅回调地址还在中继上，要换就退订再订。
+- 中继暂存的投递，守护进程处理完才会确认删除。守护进程离线多久都不会丢，前提是中继一直可用、存储没满（1 万条或 200 MB，满了中继回 503，服务端会重试）。
+- `evdock relay clear` 取消中继，`evdock relay use <新地址>` 换中继。只要还有订阅的回调地址在当前中继上，这两个命令都会拒绝并列出这些订阅：否则服务端会继续往旧中继投递、拿到 2xx，却再也没人去取。先退订它们，换好中继后再重新订阅。
 
 ## 检查
 
