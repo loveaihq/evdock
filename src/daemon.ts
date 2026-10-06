@@ -1,5 +1,6 @@
-// `evdock serve`: the receiver, the refresh loop over every active subscription, and, when a
-// relay is configured, the loop that fetches what the relay stored (docs/M3-TASK.md).
+// `evdock serve`: the receiver, the refresh loop over every active subscription, the action
+// executor (docs/M4-TASK.md), and, when a relay is configured, the loop that fetches what the
+// relay stored (docs/M3-TASK.md).
 
 import type { Server as HttpServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -7,6 +8,7 @@ import { describeError } from './events-api.js';
 import { createReceiver } from './http.js';
 import { Inbox, type Server, type Subscription } from './inbox.js';
 import type { McpClient } from './mcp-client.js';
+import { startActionRunner, type ActionRunnerOptions } from './actions.js';
 import { handleDelivery } from './receiver.js';
 import { relayFromInbox, type RelayClient } from './relay-client.js';
 import { clientFromEnv, confirmPath, connect, label, refresh, releasePath, type Context } from './subscriptions.js';
@@ -33,6 +35,8 @@ export interface DaemonOptions {
   tickMs?: number;
   /** How often to poll the relay when it has nothing waiting. */
   pollMs?: number;
+  /** Overrides for the action executor (tests). */
+  actions?: ActionRunnerOptions;
   now?: () => number;
   log?: (line: string) => void;
 }
@@ -222,6 +226,9 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   // The receiver keeps `serve` alive; the timer alone should not.
   timer.unref();
 
+  // Commands to run when messages arrive.
+  const actions = startActionRunner(inbox, { now, log, ...options.actions });
+
   return {
     url,
     inbox,
@@ -229,6 +236,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       stopped = true;
       clearInterval(timer);
       clearTimeout(pollTimer);
+      await actions.stop();
       await polling?.catch(() => {});
       receiver.closeAllConnections();
       await new Promise<void>((resolve) => receiver.close(() => resolve()));

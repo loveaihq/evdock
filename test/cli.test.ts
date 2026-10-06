@@ -56,3 +56,25 @@ test('relay use warns about plain http to a remote host', async (t) => {
   const local = await evdock('relay', 'use', 'http://127.0.0.1:8788', '--key-env', 'K', '--db', db);
   assert.doesNotMatch(local.out, /warning/);
 });
+
+test('action set / actions / action clear', async (t) => {
+  const { dir, cleanup } = tempDir();
+  t.after(cleanup);
+  const db = join(dir, 'evdock.db');
+  const inbox = new Inbox(db);
+  inbox.addSubscription({ token: 'tok_cli_actions_000001', secret: newSecret() });
+  inbox.confirmSubscription('tok_cli_actions_000001', 'sub_cli');
+  inbox.close();
+
+  let r = await evdock('action', 'set', 'sub_cli', '--max-per-hour', '2', '--window', '3', '--db', db, '--', 'node', 'agent.mjs', '--flag', '--db');
+  assert.equal(r.code, 0, r.out);
+  assert.match(r.out, /\["node","agent\.mjs","--flag","--db"\]/, 'everything after -- is the command, even option-like words');
+  r = await evdock('actions', '--db', db);
+  assert.match(r.out, /sub_cli {2}\["node","agent\.mjs","--flag","--db"\] {2}2\/hour {2}window 3 s {2}waiting 0/);
+  r = await evdock('action', 'set', 'sub_cli', '--db', db);
+  assert.equal(r.code, 2, 'no command');
+  r = await evdock('action', 'set', 'sub_cli', '--max-per-hour', '0', '--db', db, '--', 'x');
+  assert.equal(r.code, 2);
+  r = await evdock('action', 'clear', 'sub_cli', '--db', db);
+  assert.match(r.out, /action for sub_cli removed/);
+});

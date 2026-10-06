@@ -53,6 +53,20 @@ export interface RelaySetting {
   keyEnv: string;
 }
 
+/** A command to run when messages arrive for a subscription (docs/M4-TASK.md, 设计决定 2). */
+export interface Action {
+  token: string;
+  /** Executable and arguments, run without a shell. */
+  argv: string[];
+  maxPerHour: number;
+  windowMs: number;
+  /** Highest message seq already handed to the command (or skipped). */
+  doneSeq: number;
+  failures: number;
+  /** Epoch ms before which a failed batch is not retried. */
+  retryAt: number;
+}
+
 export interface Grant {
   id: string;
   refreshBefore: number | null;
@@ -101,6 +115,19 @@ CREATE TABLE IF NOT EXISTS servers (
 CREATE TABLE IF NOT EXISTS settings (
   key TEXT PRIMARY KEY,
   value TEXT NOT NULL
+) STRICT;
+CREATE TABLE IF NOT EXISTS actions (
+  token TEXT PRIMARY KEY,
+  argv TEXT NOT NULL,
+  max_per_hour INTEGER NOT NULL,
+  window_ms INTEGER NOT NULL,
+  done_seq INTEGER NOT NULL,
+  failures INTEGER NOT NULL DEFAULT 0,
+  retry_at INTEGER NOT NULL DEFAULT 0
+) STRICT;
+CREATE TABLE IF NOT EXISTS action_runs (
+  token TEXT NOT NULL,
+  started_at INTEGER NOT NULL
 ) STRICT;
 CREATE TABLE IF NOT EXISTS subscriptions (
   token TEXT PRIMARY KEY,
@@ -225,6 +252,76 @@ export class Inbox {
       }
       throw err;
     }
+  }
+
+  /**
+   * Sets the action for a subscription. A new action starts after the messages already in the
+   * inbox: it reacts to what arrives from now on, not to history. Replacing an action keeps its progress.
+   */
+  setAction(token: string, argv: string[], maxPerHour: number, windowMs: number): void {
+    const latest = this.db.prepare('SELECT coalesce(max(seq), 0) AS seq FROM events WHERE token = ?').get(token) as { seq: number };
+    this.db
+      .prepare(
+        `INSERT INTO actions (token, argv, max_per_hour, window_ms, done_seq) VALUES (?, ?, ?, ?, ?)
+         ON CONFLICT (token) DO UPDATE SET argv = excluded.argv, max_per_hour = excluded.max_per_hour,
+           window_ms = excluded.window_ms`,
+      )
+      .run(token, JSON.stringify(argv), maxPerHour, windowMs, latest.seq);
+  }
+
+  clearAction(token: string): boolean {
+    this.db.prepare('DELETE FROM action_runs WHERE token = ?').run(token);
+    return this.db.prepare('DELETE FROM actions WHERE token = ?').run(token).changes > 0;
+  }
+
+  listActions(): Action[] {
+    const rows = this.db.prepare('SELECT * FROM actions ORDER BY rowid').all() as Array<{
+      token: string;
+      argv: string;
+      max_per_hour: number;
+      window_ms: number;
+      done_seq: number;
+      failures: number;
+      retry_at: number;
+    }>;
+    return rows.map((r) => ({
+      token: r.token,
+      argv: JSON.parse(r.argv) as string[],
+      maxPerHour: r.max_per_hour,
+      windowMs: r.window_ms,
+      doneSeq: r.done_seq,
+      failures: r.failures,
+      retryAt: r.retry_at,
+    }));
+  }
+
+  /** Messages after `afterSeq`, oldest first, at most `limit`. */
+  messagesAfter(token: string, afterSeq: number, limit: number): MessageRow[] {
+    return this.messageRows('WHERE token = ? AND seq > ? ORDER BY seq LIMIT ?', token, afterSeq, limit);
+  }
+
+  /** The batch up to `seq` is finished (handed over, or given up on): move on and clear failures. */
+  finishActionBatch(token: string, seq: number): void {
+    this.db.prepare('UPDATE actions SET done_seq = ?, failures = 0, retry_at = 0 WHERE token = ?').run(seq, token);
+  }
+
+  failActionBatch(token: string, failures: number, retryAt: number): void {
+    this.db.prepare('UPDATE actions SET failures = ?, retry_at = ? WHERE token = ?').run(failures, retryAt, token);
+  }
+
+  /** Records a run, for the per-hour limit. Persisted, so restarting the daemon does not reset the count. */
+  recordActionRun(token: string, at: number): void {
+    this.db.prepare('INSERT INTO action_runs (token, started_at) VALUES (?, ?)').run(token, at);
+  }
+
+  /** Start times of runs after `since`, oldest first (a run counts for exactly an hour); older ones are deleted. */
+  actionRunsSince(token: string, since: number): number[] {
+    this.db.prepare('DELETE FROM action_runs WHERE token = ? AND started_at <= ?').run(token, since);
+    return (
+      this.db.prepare('SELECT started_at FROM action_runs WHERE token = ? ORDER BY started_at').all(token) as Array<{
+        started_at: number;
+      }>
+    ).map((r) => r.started_at);
   }
 
   getServer(name: string): Server | undefined {
@@ -408,12 +505,16 @@ export class Inbox {
   }
 
   messages(token: string): MessageRow[] {
+    return this.messageRows('WHERE token = ? ORDER BY seq', token);
+  }
+
+  private messageRows(where: string, ...params: Array<string | number>): MessageRow[] {
     const rows = this.db
       .prepare(
         `SELECT seq, token, subscription_id, webhook_id, kind, event_id, cursor, body, received_at
-         FROM events WHERE token = ? ORDER BY seq`,
+         FROM events ${where}`,
       )
-      .all(token) as Array<{
+      .all(...params) as Array<{
       seq: number;
       token: string;
       subscription_id: string;

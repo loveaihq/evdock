@@ -9,6 +9,7 @@ import { describeError, listEvents } from './events-api.js';
 import { Inbox } from './inbox.js';
 import { liveOn, relayFromInbox } from './relay-client.js';
 import { startRelayServer } from './relay/node.js';
+import { DEFAULT_MAX_PER_HOUR, DEFAULT_WINDOW_MS } from './actions.js';
 import { printable } from './text.js';
 import { clientFromEnv, connect, label, subscribe, unsubscribe, type Context } from './subscriptions.js';
 
@@ -22,6 +23,9 @@ const USAGE = `usage:
   evdock relay use     <relay-url> --key-env <ENV_VAR>
   evdock relay clear
   evdock relay serve   --key-env <ENV_VAR> [--host 127.0.0.1] [--port 8788]
+  evdock action set    <subscription-id> [--max-per-hour 6] [--window 10] -- <command> [args...]
+  evdock action clear  <subscription-id>
+  evdock actions
 All commands take --db <file> (default evdock.db; relay.db for relay serve). Tokens and the
 relay key are read from the environment variables named with --token-env / --key-env; they
 are never stored.
@@ -37,6 +41,8 @@ const OPTIONS = {
   'key-env': { type: 'string' },
   args: { type: 'string', default: '{}' },
   'callback-base': { type: 'string' },
+  'max-per-hour': { type: 'string' },
+  window: { type: 'string' },
 } as const;
 
 class UsageError extends Error {}
@@ -78,7 +84,14 @@ function parseJsonObject(text: string): Record<string, unknown> {
 }
 
 async function main(argv: string[]): Promise<void> {
-  const { values: given, positionals } = parseArgs({ args: argv, options: OPTIONS, allowPositionals: true });
+  // Everything after `--` is an action's command line, taken verbatim (never parsed as options).
+  const dashDash = argv.indexOf('--');
+  const commandLine = dashDash === -1 ? [] : argv.slice(dashDash + 1);
+  const { values: given, positionals } = parseArgs({
+    args: dashDash === -1 ? argv : argv.slice(0, dashDash),
+    options: OPTIONS,
+    allowPositionals: true,
+  });
   const [command, ...rest] = positionals;
   const relayServe = command === 'relay' && rest[0] === 'serve';
   const values = { ...given, db: given.db ?? (relayServe ? 'relay.db' : 'evdock.db') };
@@ -194,6 +207,64 @@ async function main(argv: string[]): Promise<void> {
       console.log(`unsubscribed ${label(sub)}`);
     } finally {
       ctx.inbox.close();
+    }
+    return;
+  }
+
+  if (command === 'action' && rest[0] === 'set' && rest[1]) {
+    if (commandLine.length === 0 || !commandLine[0]) throw new UsageError('action set needs a command after --');
+    const maxPerHour = Number(values['max-per-hour'] ?? DEFAULT_MAX_PER_HOUR);
+    const windowSeconds = Number(values.window ?? DEFAULT_WINDOW_MS / 1000);
+    if (!Number.isInteger(maxPerHour) || maxPerHour < 1) throw new UsageError('--max-per-hour must be a whole number, 1 or more');
+    if (!Number.isFinite(windowSeconds) || windowSeconds < 0) throw new UsageError('--window must be a number of seconds, 0 or more');
+    const inbox = new Inbox(values.db);
+    try {
+      const sub = inbox.findSubscription(rest[1]);
+      if (!sub) throw new UsageError(`no subscription ${rest[1]}`);
+      inbox.setAction(sub.token, commandLine, maxPerHour, Math.round(windowSeconds * 1000));
+      console.log(
+        `action for ${label(sub)}: ${JSON.stringify(commandLine)} (at most ${maxPerHour}/hour, ${windowSeconds} s window); ` +
+          'runs for messages arriving from now on, while `evdock serve` is running',
+      );
+    } finally {
+      inbox.close();
+    }
+    return;
+  }
+
+  if (command === 'action' && rest[0] === 'clear' && rest[1]) {
+    const inbox = new Inbox(values.db);
+    try {
+      const sub = inbox.findSubscription(rest[1]);
+      if (!sub) throw new UsageError(`no subscription ${rest[1]}`);
+      console.log(inbox.clearAction(sub.token) ? `action for ${label(sub)} removed` : `${label(sub)} has no action`);
+    } finally {
+      inbox.close();
+    }
+    return;
+  }
+
+  if (command === 'actions') {
+    const inbox = new Inbox(values.db);
+    try {
+      for (const action of inbox.listActions()) {
+        const sub = inbox.getSubscription(action.token);
+        const waiting = inbox.messagesAfter(action.token, action.doneSeq, 1000).length;
+        console.log(
+          [
+            sub ? label(sub) : `${action.token.slice(0, 6)}…`,
+            JSON.stringify(action.argv),
+            `${action.maxPerHour}/hour`,
+            `window ${action.windowMs / 1000} s`,
+            `waiting ${waiting}`,
+            action.failures > 0 ? `failed ${action.failures}x, next try ${new Date(action.retryAt).toISOString()}` : '',
+          ]
+            .filter(Boolean)
+            .join('  '),
+        );
+      }
+    } finally {
+      inbox.close();
     }
     return;
   }
