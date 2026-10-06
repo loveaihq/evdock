@@ -46,6 +46,13 @@ export interface Server {
   tokenEnv: string;
 }
 
+export interface RelaySetting {
+  /** Base URL of the relay, e.g. https://evdock-relay.example.workers.dev */
+  url: string;
+  /** Name of the environment variable holding the relay key. */
+  keyEnv: string;
+}
+
 export interface Grant {
   id: string;
   refreshBefore: number | null;
@@ -90,6 +97,10 @@ CREATE TABLE IF NOT EXISTS servers (
   name TEXT PRIMARY KEY,
   url TEXT NOT NULL,
   token_env TEXT NOT NULL
+) STRICT;
+CREATE TABLE IF NOT EXISTS settings (
+  key TEXT PRIMARY KEY,
+  value TEXT NOT NULL
 ) STRICT;
 CREATE TABLE IF NOT EXISTS subscriptions (
   token TEXT PRIMARY KEY,
@@ -182,6 +193,38 @@ export class Inbox {
          ON CONFLICT (name) DO UPDATE SET url = excluded.url, token_env = excluded.token_env`,
       )
       .run(server.name, server.url, server.tokenEnv);
+  }
+
+  /** The relay this daemon uses, if any. The key itself is never stored: only the variable that holds it. */
+  getRelay(): RelaySetting | undefined {
+    const rows = this.db.prepare("SELECT key, value FROM settings WHERE key IN ('relay.url', 'relay.keyEnv')").all() as Array<{
+      key: string;
+      value: string;
+    }>;
+    const get = (key: string) => rows.find((r) => r.key === key)?.value;
+    const url = get('relay.url');
+    const keyEnv = get('relay.keyEnv');
+    return url && keyEnv ? { url, keyEnv } : undefined;
+  }
+
+  setRelay(relay: RelaySetting | undefined): void {
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      this.db.prepare("DELETE FROM settings WHERE key IN ('relay.url', 'relay.keyEnv')").run();
+      if (relay) {
+        const put = this.db.prepare('INSERT INTO settings (key, value) VALUES (?, ?)');
+        put.run('relay.url', relay.url);
+        put.run('relay.keyEnv', relay.keyEnv);
+      }
+      this.db.exec('COMMIT');
+    } catch (err) {
+      try {
+        this.db.exec('ROLLBACK');
+      } catch {
+        // Already rolled back.
+      }
+      throw err;
+    }
   }
 
   getServer(name: string): Server | undefined {

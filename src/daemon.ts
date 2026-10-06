@@ -1,12 +1,16 @@
-// `evdock serve`: the receiver plus the refresh loop over every active subscription.
+// `evdock serve`: the receiver, the refresh loop over every active subscription, and, when a
+// relay is configured, the loop that fetches what the relay stored (docs/M3-TASK.md).
 
 import type { Server as HttpServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
+import { describeError } from './events-api.js';
 import { createReceiver } from './http.js';
 import { Inbox, type Server, type Subscription } from './inbox.js';
 import type { McpClient } from './mcp-client.js';
-import { describeError } from './events-api.js';
-import { clientFromEnv, connect, label, refresh, type Context } from './subscriptions.js';
+import { handleDelivery } from './receiver.js';
+import { relayFromInbox, type RelayClient } from './relay-client.js';
+import { clientFromEnv, confirmPath, connect, label, refresh, releasePath, type Context } from './subscriptions.js';
+import { printable } from './text.js';
 
 /** Refresh once two thirds of the granted lifetime has passed. */
 const REFRESH_AT = 2 / 3;
@@ -15,14 +19,20 @@ const MIN_REFRESH_INTERVAL_MS = 1000;
 /** For a no-expiry grant: still refresh now and then, which is where the cursor advances. */
 const NO_EXPIRY_REFRESH_MS = 60 * 60 * 1000;
 const MAX_RETRY_DELAY_MS = 60 * 1000;
+/** How often to ask the relay for new deliveries (docs/M3-TASK.md, 设计决定 4). */
+const RELAY_POLL_MS = 5000;
 
 export interface DaemonOptions {
   dbPath: string;
   host?: string;
   port?: number;
   client?: (server: Server) => McpClient;
+  /** The relay to fetch from. Default: the one configured in the database (`evdock relay use`); null for none. */
+  relay?: RelayClient | null;
   /** How often to look for subscriptions due a refresh. */
   tickMs?: number;
+  /** How often to poll the relay when it has nothing waiting. */
+  pollMs?: number;
   now?: () => number;
   log?: (line: string) => void;
 }
@@ -45,7 +55,14 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   const now = options.now ?? Date.now;
   const log = options.log ?? (() => {});
   const inbox = new Inbox(options.dbPath);
-  const ctx: Context = { inbox, client: options.client ?? clientFromEnv, now, log };
+  let relay: RelayClient | undefined;
+  try {
+    relay = options.relay === undefined ? relayFromInbox(inbox) : (options.relay ?? undefined);
+  } catch (err) {
+    inbox.close();
+    throw err;
+  }
+  const ctx: Context = { inbox, client: options.client ?? clientFromEnv, now, log, relay };
 
   // The receiver must be up first: re-subscribing may trigger a verification handshake.
   const receiver: HttpServer = createReceiver({ inbox, now, log });
@@ -105,6 +122,70 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   }
 
   const active = () => inbox.listSubscriptions().filter((s) => s.status === 'active' && s.server !== null);
+  let stopped = false;
+
+  // --- Relay fetch loop ---
+
+  let pollTimer: NodeJS.Timeout | undefined;
+  let polling: Promise<void> | undefined;
+  let pollFailures = 0;
+
+  // One batch: each delivery goes through the same checks as a direct POST, with the relay's
+  // receive time for the timestamp window. Returns true if more is waiting.
+  async function fetchBatch(relay: RelayClient): Promise<boolean> {
+    const { deliveries, more } = await relay.fetchDeliveries();
+    let upTo: number | undefined;
+    for (const d of deliveries) {
+      let outcome: string;
+      try {
+        const result = handleDelivery(inbox, { token: d.token, headers: d.headers, body: d.body, receivedAtMs: d.receivedAt });
+        outcome = result.outcome;
+        log(`${result.status} ${outcome} hook=${d.token.slice(0, 6)}… webhook-id=${printable(d.headers['webhook-id'] ?? '-', 80)} (relay #${d.seq})`);
+      } catch (err) {
+        // A bug, not a transient failure: one bad record must not block everything behind it.
+        outcome = 'dropped';
+        log(`dropped relay #${d.seq}: ${(err as Error).message}`);
+      }
+      // Only a local failure to store is worth fetching again; every other answer is final.
+      if (outcome === 'store-failed' || outcome === 'inbox-unavailable') {
+        if (upTo !== undefined) await relay.ack(upTo);
+        return false;
+      }
+      upTo = d.seq;
+      if (outcome === 'stored-terminated') {
+        const sub = inbox.getSubscription(d.token);
+        if (sub) await releasePath(ctx, sub);
+      }
+    }
+    if (upTo !== undefined) await relay.ack(upTo);
+    return more;
+  }
+
+  function schedulePoll(relay: RelayClient, delay: number): void {
+    if (stopped) return;
+    pollTimer = setTimeout(() => {
+      polling = (async () => {
+        let next = options.pollMs ?? RELAY_POLL_MS;
+        try {
+          if (await fetchBatch(relay)) next = 0; // more waiting: fetch again straight away
+          pollFailures = 0;
+        } catch (err) {
+          pollFailures++;
+          next = Math.min(next * 2 ** (pollFailures - 1), MAX_RETRY_DELAY_MS);
+          if (!stopped) log(`relay fetch failed, retrying in ${Math.round(next / 1000)} s: ${(err as Error).message}`);
+        }
+        schedulePoll(relay, next);
+      })();
+    }, delay);
+    pollTimer.unref();
+  }
+
+  if (relay) {
+    // Make sure the relay stores events for every active subscription before anything is
+    // re-sent: a confirmation can have been missed, or the relay may have lost its paths.
+    await Promise.all(active().map((sub) => confirmPath(ctx, sub)));
+    schedulePoll(relay, 0);
+  }
 
   // On start, replay from the saved cursor: anything abandoned by the server while we were down
   // would otherwise be lost (docs/M2-TASK.md, "规范缺口").
@@ -112,7 +193,6 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   for (const sub of atStart) needsResubscribe.add(sub.token);
   await Promise.all(atStart.map(run));
 
-  let stopped = false;
   const timer = setInterval(() => {
     if (stopped) return;
     let subs: Subscription[];
@@ -138,6 +218,8 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
     async stop() {
       stopped = true;
       clearInterval(timer);
+      clearTimeout(pollTimer);
+      await polling?.catch(() => {});
       receiver.closeAllConnections();
       await new Promise<void>((resolve) => receiver.close(() => resolve()));
       await Promise.allSettled(inFlight.values());

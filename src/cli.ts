@@ -1,11 +1,14 @@
 #!/usr/bin/env node
-// evdock command line. `serve` runs the receiver and the refresh loop; the other commands
-// manage servers and subscriptions in the same database.
+// evdock command line. `serve` runs the receiver, the refresh loop and the relay fetch loop;
+// `relay serve` runs a relay on this host; the other commands manage servers, subscriptions
+// and the relay setting in the same database.
 
 import { parseArgs } from 'node:util';
 import { startDaemon } from './daemon.js';
 import { describeError, listEvents } from './events-api.js';
 import { Inbox } from './inbox.js';
+import { relayFromInbox } from './relay-client.js';
+import { startRelayServer } from './relay/node.js';
 import { printable } from './text.js';
 import { clientFromEnv, connect, label, subscribe, unsubscribe, type Context } from './subscriptions.js';
 
@@ -13,27 +16,39 @@ const USAGE = `usage:
   evdock serve         [--host 127.0.0.1] [--port 8787]
   evdock server add    <name> --url <mcp-endpoint> --token-env <ENV_VAR>
   evdock events        <server>
-  evdock subscribe     <server> <event> [--args <json>] [--callback-base http://127.0.0.1:8787]
+  evdock subscribe     <server> <event> [--args <json>] [--callback-base <url>]
   evdock unsubscribe   <subscription-id>
   evdock subscriptions
-All commands take --db <file> (default evdock.db). The bearer token is read from the
-environment variable named with --token-env; it is never stored.
-subscribe needs \`evdock serve\` running: the server verifies the callback before answering.`;
+  evdock relay use     <relay-url> --key-env <ENV_VAR>
+  evdock relay clear
+  evdock relay serve   --key-env <ENV_VAR> [--host 127.0.0.1] [--port 8788]
+All commands take --db <file> (default evdock.db; relay.db for relay serve). Tokens and the
+relay key are read from the environment variables named with --token-env / --key-env; they
+are never stored.
+subscribe sends callbacks to the relay if one is set (evdock relay use), otherwise to
+--callback-base (default http://127.0.0.1:8787, which needs \`evdock serve\` running).`;
 
 const OPTIONS = {
-  db: { type: 'string', default: 'evdock.db' },
+  db: { type: 'string' },
   host: { type: 'string', default: '127.0.0.1' },
-  port: { type: 'string', default: '8787' },
+  port: { type: 'string' },
   url: { type: 'string' },
   'token-env': { type: 'string' },
+  'key-env': { type: 'string' },
   args: { type: 'string', default: '{}' },
-  'callback-base': { type: 'string', default: 'http://127.0.0.1:8787' },
+  'callback-base': { type: 'string' },
 } as const;
 
 class UsageError extends Error {}
 
 function context(dbPath: string): Context {
-  return { inbox: new Inbox(dbPath), client: clientFromEnv, now: Date.now, log: (line) => console.log(line) };
+  const inbox = new Inbox(dbPath);
+  try {
+    return { inbox, client: clientFromEnv, now: Date.now, log: (line) => console.log(line), relay: relayFromInbox(inbox) };
+  } catch (err) {
+    inbox.close();
+    throw err;
+  }
 }
 
 function parseJsonObject(text: string): Record<string, unknown> {
@@ -48,14 +63,55 @@ function parseJsonObject(text: string): Record<string, unknown> {
 }
 
 async function main(argv: string[]): Promise<void> {
-  const { values, positionals } = parseArgs({ args: argv, options: OPTIONS, allowPositionals: true });
+  const { values: given, positionals } = parseArgs({ args: argv, options: OPTIONS, allowPositionals: true });
   const [command, ...rest] = positionals;
+  const relayServe = command === 'relay' && rest[0] === 'serve';
+  const values = { ...given, db: given.db ?? (relayServe ? 'relay.db' : 'evdock.db') };
+
+  if (relayServe) {
+    const keyEnv = values['key-env'];
+    if (!keyEnv) throw new UsageError('relay serve needs --key-env');
+    const key = process.env[keyEnv];
+    if (!key) throw new Error(`environment variable ${keyEnv} (relay key) is not set`);
+    const relay = await startRelayServer({
+      dbPath: values.db,
+      key,
+      host: values.host,
+      port: Number(values.port ?? 8788),
+      log: (line) => console.log(line),
+    });
+    console.log(`evdock relay on ${relay.url} (plain HTTP: put TLS in front of it)`);
+    const shutdown = () => void relay.close().then(() => process.exit(0));
+    process.once('SIGINT', shutdown);
+    process.once('SIGTERM', shutdown);
+    return;
+  }
+
+  if (command === 'relay' && rest[0] === 'use' && rest[1]) {
+    const keyEnv = values['key-env'];
+    if (!keyEnv) throw new UsageError('relay use needs --key-env');
+    const url = rest[1].replace(/\/+$/, '');
+    if (!/^https?:\/\//.test(url)) throw new UsageError('relay url must start with https:// (or http:// for local testing)');
+    const inbox = new Inbox(values.db);
+    inbox.setRelay({ url, keyEnv });
+    inbox.close();
+    console.log(`relay ${url} (key from $${keyEnv}); new subscriptions will use it`);
+    return;
+  }
+
+  if (command === 'relay' && rest[0] === 'clear') {
+    const inbox = new Inbox(values.db);
+    inbox.setRelay(undefined);
+    inbox.close();
+    console.log('relay cleared; subscriptions already on it stop receiving until re-created');
+    return;
+  }
 
   if (command === 'serve') {
     const daemon = await startDaemon({
       dbPath: values.db,
       host: values.host,
-      port: Number(values.port),
+      port: Number(values.port ?? 8787),
       log: (line) => console.log(line),
     });
     console.log(`evdock receiving on ${daemon.url}/hooks/<token>`);
@@ -98,7 +154,8 @@ async function main(argv: string[]): Promise<void> {
         server: rest[0],
         eventName: rest[1],
         arguments: parseJsonObject(values.args),
-        callbackBase: values['callback-base'],
+        // The relay if one is set, unless a callback base is given explicitly.
+        callbackBase: values['callback-base'] ?? (ctx.relay ? undefined : 'http://127.0.0.1:8787'),
       });
       const until = sub.refreshBefore === null ? 'no expiry' : new Date(sub.refreshBefore).toISOString();
       console.log(`subscribed ${label(sub)} to ${sub.eventName} on ${sub.server}, refresh before ${until}`);
