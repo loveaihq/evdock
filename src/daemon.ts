@@ -184,7 +184,16 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
     // Make sure the relay stores events for every active subscription before anything is
     // re-sent: a confirmation can have been missed, or the relay may have lost its paths.
     await Promise.all(active().map((sub) => confirmPath(ctx, sub)));
-    schedulePoll(relay, 0);
+    // Take in what the relay held while we were away before re-subscribing: the cursors those
+    // deliveries carry are newer, so the resubscribe below replays less. (Run concurrently, the
+    // resubscribe could read the old cursor first, then write back the server's older one.)
+    try {
+      while (await fetchBatch(relay)) {
+        // keep going while the relay says more is waiting
+      }
+    } catch (err) {
+      log(`relay fetch failed, continuing: ${(err as Error).message}`);
+    }
   }
 
   // On start, replay from the saved cursor: anything abandoned by the server while we were down
@@ -192,6 +201,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   const atStart = active();
   for (const sub of atStart) needsResubscribe.add(sub.token);
   await Promise.all(atStart.map(run));
+  if (relay) schedulePoll(relay, 0);
 
   const timer = setInterval(() => {
     if (stopped) return;
