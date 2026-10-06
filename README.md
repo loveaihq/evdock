@@ -61,7 +61,7 @@ It prints `demo MCP server: http://127.0.0.1:8790/mcp` and starts making up inci
 node dist/src/cli.js serve
 ```
 
-It prints `evdock receiving on http://127.0.0.1:8787/hooks/<token>`. Keep it running.
+It prints `evdock receiving on http://127.0.0.1:8787/hooks/<token>`; `<token>` is literal there, standing for each subscription's own random path. Keep it running: the server checks the callback while `subscribe` runs, so `serve` must be up before the next step.
 
 **Terminal 3: subscribe and choose what to run.** Set `DEMO_TOKEN` first, then run these one at a time:
 
@@ -77,26 +77,28 @@ node dist/src/cli.js events demo
 node dist/src/cli.js subscribe demo incident.created
 ```
 
-The last one prints the subscription id, for example `subscribed sub_063431ee160dc7d5 to incident.created on demo`. Use your id in the next command:
+The last one prints the subscription id: `subscribed sub_… to incident.created on demo, refresh before …`. Terminal 2 shows `200 verification …`, the server checking the callback, and from then on `200 stored-event …` for each incident: events are received, verified and stored from the moment you subscribe.
+
+Now choose what runs when they arrive. Put your subscription id in place of `<subscription-id>`:
 
 ```bash
-node dist/src/cli.js action set sub_063431ee160dc7d5 -- node examples/agent.mjs
+node dist/src/cli.js action set <subscription-id> -- node examples/agent.mjs
 ```
 
-Within about 25 seconds, terminal 2 shows the event arriving, its signature checked, and the agent woken:
+An action reacts to events that arrive after it is set. Those already stored stay in the inbox and do not wake the agent. Within about 25 seconds of `action set`, terminal 2 shows the next event arriving and the agent woken. Output is shortened here, and the ids and times will differ:
 
 ```
-200 stored-event hook=8fXPk-… webhook-id=evt_659d1237_1
+200 stored-event hook=8fXPk-… webhook-id=evt_659d1237_2
 action sub_063431ee160dc7d5: running node with 1 message(s)
 
 [agent] woke up at 4:48:04 pm: 1 message(s) from demo / incident.created
-[agent]   evt_659d1237_1: INC-1001 P2 "Database connection pool exhausted"
+[agent]   evt_659d1237_2: INC-1002 P3 "Checkout latency above 2 s"
 action sub_063431ee160dc7d5: done in 130 ms
 ```
 
 The action waits 10 seconds after the first new event before waking the agent, so a burst of events wakes it once. It wakes the agent at most 6 times an hour. Events that arrive over that limit are not dropped: they wait and go to the agent together in the next run. With an incident every 15 seconds, the hourly limit is reached after a few minutes.
 
-To stop, press Ctrl+C in terminals 1 and 2. The demo leaves an `evdock.db` file in the repository root, which you can delete.
+To stop, you can first run `node dist/src/cli.js unsubscribe <subscription-id>` in terminal 3 (optional), then press Ctrl+C in terminals 1 and 2. The demo leaves `evdock.db` in the repository root, sometimes with `evdock.db-wal` and `evdock.db-shm` next to it. They are ignored by git and safe to delete.
 
 ## Using it with a real MCP server
 
