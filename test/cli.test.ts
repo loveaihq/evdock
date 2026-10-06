@@ -54,7 +54,7 @@ test('relay use warns about plain http to a remote host', async (t) => {
   const remote = await evdock('relay', 'use', 'http://relay.example', '--key-env', 'K', '--db', db);
   assert.match(remote.out, /warning: plain http/);
   const local = await evdock('relay', 'use', 'http://127.0.0.1:8788', '--key-env', 'K', '--db', db);
-  assert.doesNotMatch(local.out, /warning/);
+  assert.doesNotMatch(local.out, /warning: plain http/); // Node 22 adds its own SQLite ExperimentalWarning
 });
 
 test('action set / actions / action clear', async (t) => {

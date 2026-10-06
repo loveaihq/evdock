@@ -22,7 +22,7 @@ your machine (no inbound ports)
 
 ## Requirements
 
-Node.js 22.13 or later (it uses the built-in `node:sqlite`). Windows, macOS or Linux. No runtime dependencies.
+Node.js 22.13 or later (it uses the built-in `node:sqlite`). Windows, macOS or Linux. No runtime dependencies. On Node 22, every command also prints `ExperimentalWarning: SQLite is an experimental feature`. That warning comes from Node itself and is harmless.
 
 ## Install
 
