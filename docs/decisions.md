@@ -231,3 +231,21 @@ body 大小（读 body 时）→ 路径是否登记 → 四个必需头 → 时�
 | 有更多就立刻再取；出错按 5、10、20、40、60 秒退避 | 积压尽快清空；中继暂时不可用时不狂刷。 |
 | 中继模式下本地接收端照常运行 | 直连模式的旧订阅不受影响。 |
 | `evdock relay clear` 不迁移已有订阅 | 回调地址是订阅键的一部分，换地址就是另一个订阅；要换就退订再订。 |
+
+### Worker 跑法
+
+| 选择 | 理由 |
+| --- | --- |
+| 一个 Worker 加一个 Durable Object（`idFromName('relay')`），Worker 等它的响应回来才回 | Durable Object 的 output gate 保证响应在写盘之后才发出（Cloudflare 文档 rules-of-durable-objects），所以 2xx 一定在落盘之后。 |
+| BLOB 直接绑 `Uint8Array`，读回来的 `ArrayBuffer` 转成 `Uint8Array` | 本地 workerd 实测接受 `Uint8Array`；转换之后核心看到的类型和 `node:sqlite` 一样。 |
+| 用 `migrations` + `new_sqlite_classes` 声明类，不用新的 `exports` 写法 | 两种都能用，但不能混用，一旦用 `exports` 部署过就回不去了；`migrations` 是文档里写全了的那种。 |
+| `compatibility_date` 设 2026-10-01 | 固定版本的 wrangler 自带的 workerd 最新只支持到这一天。 |
+| `send_metrics: false` | 不把这个项目的 wrangler 使用数据发给 Cloudflare。 |
+| 本地测试把密钥放在 wrangler 进程的环境变量里，不用 `--var` | `--var` 的值会被 wrangler 打印在启动时的绑定表里。 |
+| 核心里 `TextDecoder` 的选项写全 `{ fatal: true, ignoreBOM: false }` | Workers 的类型定义要求两个都给；行为不变。这样就不用修补生成的类型文件。 |
+
+### 已知限制
+
+- `wrangler dev` 本地代理在中继不读 body 就回 413 时，会把这条连接断掉，下一个 POST 可能拿到 500。测试里多发两个 GET 绕过。部署到 Cloudflare 之后是否也这样，本地验证不了。
+- Cloudflare 自己的日志（`wrangler tail`、Workers Logs）会记录完整的请求地址，包括路径令牌。这些日志在用户自己的账号里；拿到令牌只能往这条路径塞注定验签失败的投递。已写进 `docs/relay.md`。
+- 中继如果长时间不可用（比如用完了当天的免费额度），服务端的重试会用尽，事件被放弃，也就是那个规范缺口。守护进程只在启动时做"先退订、再带游标订阅"，所以中继恢复后要重启一次 `evdock serve` 才能补回。可以让守护进程在中继恢复时自动重订，但这超出 M3 的范围，先记在这里。

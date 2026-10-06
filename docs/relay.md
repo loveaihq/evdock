@@ -19,7 +19,35 @@ node -e "console.log(require('crypto').randomBytes(32).toString('base64url'))"
 
 ## 跑法一：Cloudflare Worker
 
-<!-- WORKER-SECTION -->
+代码在 `relay-worker/`：一个 Worker 把所有请求交给一个带 SQLite 的 Durable Object，后者跑的就是 `src/relay/core.ts`。免费层只支持 SQLite 版的 Durable Object，配置里已经按这个写好了。
+
+下面这些都要用你自己的 Cloudflare 账号，由你来做：
+
+1. 注册 Cloudflare 账号，免费计划即可。
+2. 登录 wrangler，会打开浏览器授权：
+   ```bash
+   npx wrangler login
+   ```
+3. 部署：
+   ```bash
+   npx wrangler deploy -c relay-worker/wrangler.jsonc
+   ```
+   部署成功后会打印地址，形如 `https://evdock-relay.<你的子域>.workers.dev`。
+4. 设置中继密钥。按提示粘贴，密钥不会出现在命令行历史里：
+   ```bash
+   npx wrangler secret put RELAY_KEY -c relay-worker/wrangler.jsonc
+   ```
+5. 检查：
+   ```bash
+   curl -i https://evdock-relay.<你的子域>.workers.dev/relay/deliveries
+   ```
+   应该返回 401，因为没带密钥。
+
+注意：
+
+- **免费额度。** 每天 10 万次请求，守护进程每 5 秒取一次，约用掉 18%。超出不会扣费，只会在 UTC 0 点之前返回错误。这期间服务端的投递会失败，重试用尽的事件会被服务端放弃（就是上报给工作组的那个规范缺口）。额度恢复后重启一次 `evdock serve`，它会带着保存的游标重订，把这些事件补回来。
+- **Cloudflare 自己的日志。** `wrangler tail` 和 Workers Logs 会记录请求地址，里面有完整的路径令牌（evdock 自己的日志行只记前 6 位）。这些日志在你自己的账号里。拿到令牌的人能往这条路径塞投递，但塞进来的都过不了守护进程的验签，最多占点存储和请求额度。
+- **本地试跑。** 不用账号：`npm run test:worker` 会用 `wrangler dev` 在本机起一个 Worker 跑完整测试，全程不联网。
 
 ## 跑法二：Node 主机
 
