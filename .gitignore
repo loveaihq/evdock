@@ -9,3 +9,9 @@ docs/spec/openai-*
 
 # Claude Code worktrees for subagents
 .claude/worktrees/
+
+# Cloudflare Worker relay: wrangler's local state, local secrets, generated runtime types
+.wrangler/
+relay-worker/.dev.vars*
+relay-worker/.env*
+relay-worker/worker-configuration.d.ts

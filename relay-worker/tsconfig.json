@@ -1,0 +1,17 @@
+{
+  // Type-checks the Worker against the Workers runtime types that `wrangler types` generates
+  // into worker-configuration.d.ts (npm run typecheck:worker). Wrangler bundles; tsc only checks.
+  "compilerOptions": {
+    "target": "ES2023",
+    "lib": ["ES2023"],
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "verbatimModuleSyntax": true,
+    "skipLibCheck": true,
+    "noEmit": true,
+    "types": []
+  },
+  "include": ["src", "worker-configuration.d.ts"]
+}
