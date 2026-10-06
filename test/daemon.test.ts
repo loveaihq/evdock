@@ -8,7 +8,8 @@ import { test } from 'node:test';
 import { startMockServer, type MockServer, type MockServerOptions } from '../src/conformance/mock-server.js';
 import { startDaemon, type Daemon } from '../src/daemon.js';
 import type { Server } from '../src/inbox.js';
-import { McpClient } from '../src/mcp-client.js';
+import { listEvents } from '../src/events-api.js';
+import { McpClient, TransportError } from '../src/mcp-client.js';
 import { refresh, subscribe, unsubscribe, type Context } from '../src/subscriptions.js';
 import { tempDir } from './helpers.js';
 
@@ -46,7 +47,7 @@ interface Setup {
   dbPath: string;
   port: number;
   logs: string[];
-  start(): Promise<Daemon>;
+  start(clientFactory?: (server: Server) => McpClient): Promise<Daemon>;
   ctx(daemon: Daemon): Context;
 }
 
@@ -74,8 +75,8 @@ async function setup(t: { after: (fn: () => Promise<void> | void) => void }, moc
     dbPath,
     port,
     logs,
-    async start() {
-      const daemon = await startDaemon({ dbPath, port, client, tickMs: 50, log: (line) => logs.push(line) });
+    async start(clientFactory = client) {
+      const daemon = await startDaemon({ dbPath, port, client: clientFactory, tickMs: 50, log: (line) => logs.push(line) });
       daemons.push(daemon);
       return daemon;
     },
@@ -100,9 +101,19 @@ async function subscribed(s: Setup, daemon: Daemon) {
   });
 }
 
-test('lifecycle: subscribe with handshake, deliveries, refreshes, quiet-period cursor, unsubscribe', async (t) => {
-  const s = await setup(t, { listPageSize: 1, sseResponses: true });
+test('lifecycle: discover, list, subscribe with handshake, deliveries, refreshes, quiet-period cursor, unsubscribe', async (t) => {
+  const OTHER = { ...EVENT_TYPE, name: 'incident.resolved', description: 'An incident was resolved' };
+  const s = await setup(t, { listPageSize: 1, sseResponses: true, eventTypes: [EVENT_TYPE, OTHER] });
   const daemon = await s.start();
+  const listed = await listEvents(client({ name: 'mock', url: s.mock.url, tokenEnv: 'UNUSED' }));
+  assert.deepEqual(
+    listed.map((e) => [e.name, e.delivery]),
+    [
+      ['incident.created', ['webhook']],
+      ['incident.resolved', ['webhook']],
+    ],
+    'two pages, one event type each',
+  );
   const sub = await subscribed(s, daemon);
   assert.equal(sub.status, 'active');
   assert.match(sub.subscriptionId ?? '', /^sub_/);
@@ -158,6 +169,35 @@ for (const [name, downMs] of [
     assert.equal(new Set(received).size, received.length, 'each once');
   });
 }
+
+test('restart while the MCP server is briefly unreachable: the resubscribe is retried, nothing lost', async (t) => {
+  const s = await setup(t);
+  let daemon = await s.start();
+  const sub = await subscribed(s, daemon);
+  const emitted = [s.mock.emit('incident.created', { severity: 'P1', n: 1 }).eventId];
+  await until('first event', () => eventIds(daemon, sub.token).length === 1);
+
+  await daemon.stop();
+  emitted.push(s.mock.emit('incident.created', { severity: 'P1', n: 2 }).eventId);
+  await sleep(1200); // retries exhausted, subscription still live: the gap case
+
+  // The first two MCP calls after the restart fail as if the server were unreachable.
+  let failures = 2;
+  const flaky = (server: Server) => {
+    const real = client(server);
+    return Object.assign(Object.create(real) as McpClient, {
+      request: (method: string, params?: Record<string, unknown>) =>
+        failures-- > 0 ? Promise.reject(new TransportError(`${method}: ECONNREFUSED`)) : real.request(method, params),
+      discover: () => (failures-- > 0 ? Promise.reject(new TransportError('server/discover: ECONNREFUSED')) : real.discover()),
+    });
+  };
+  daemon = await s.start(flaky);
+  assert.ok(s.logs.some((l) => l.includes('failed, will retry')), 'the first attempt failed');
+
+  await until('the abandoned event', () => eventIds(daemon, sub.token).length === 2, 8000);
+  assert.deepEqual([...eventIds(daemon, sub.token)].sort(), [...emitted].sort());
+  assert.ok(s.logs.some((l) => l.startsWith('resubscribed')), 'the retry was a resubscribe, not a plain refresh');
+});
 
 test('the spec gap: without the resubscribe, events abandoned while down are lost', async (t) => {
   const s = await setup(t);

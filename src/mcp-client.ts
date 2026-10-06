@@ -59,6 +59,8 @@ async function* sseData(body: ReadableStream<Uint8Array>): AsyncGenerator<string
       if (line === '') {
         if (data.length > 0) yield data.join('\n');
         data = [];
+      } else if (line === 'data') {
+        data.push(''); // a field name with no colon has an empty value
       } else if (line.startsWith('data:')) {
         data.push(line.slice(line.startsWith('data: ') ? 6 : 5));
       }
@@ -72,9 +74,10 @@ export class McpClient {
   constructor(private readonly options: McpClientOptions) {}
 
   /**
-   * Sends one request and returns its result. A response stream that breaks before the
-   * response arrives is re-issued once with a new id, as the base spec requires; the
-   * events/* methods are idempotent, so that is safe.
+   * Sends one request and returns its result. A response that breaks before the JSON-RPC
+   * response arrives (clean end or reset) is re-issued once with a new id, as the base spec
+   * requires (docs/spec/mcp-2026-07-28/changelog.mdx); the events/* methods are idempotent,
+   * so that is safe.
    */
   async request(method: string, params: Json = {}): Promise<Json> {
     try {
@@ -131,19 +134,27 @@ export class McpClient {
       throw new TransportError(`${method}: ${cause?.code ?? (err as Error).message}`);
     }
 
-    const type = res.headers.get('content-type') ?? '';
+    // Media types are case-insensitive.
+    const type = (res.headers.get('content-type') ?? '').toLowerCase();
     let message: unknown;
-    if (type.startsWith('text/event-stream') && res.body) {
-      message = await this.readStream(res.body, id);
-    } else {
-      const text = await res.text();
-      try {
-        message = JSON.parse(text);
-      } catch {
-        message = undefined;
+    try {
+      if (type.startsWith('text/event-stream') && res.body) {
+        message = await this.readStream(res.body, id);
+      } else {
+        const text = await res.text();
+        try {
+          message = JSON.parse(text);
+        } catch {
+          message = undefined;
+        }
       }
+    } catch (err) {
+      if (err instanceof StreamEnded) throw err;
+      const name = (err as Error).name;
+      if (name === 'TimeoutError' || name === 'AbortError') throw new TransportError(`${method}: timed out`);
+      throw new StreamEnded(); // the connection broke while the body was being read
     }
-    return this.unwrap(method, res.status, message);
+    return this.unwrap(method, res.status, message, id);
   }
 
   private async readStream(body: ReadableStream<Uint8Array>, id: number): Promise<unknown> {
@@ -160,10 +171,16 @@ export class McpClient {
     throw new StreamEnded();
   }
 
-  private unwrap(method: string, status: number, message: unknown): Json {
+  private unwrap(method: string, status: number, message: unknown, id: number): Json {
     if (isObject(message) && isObject(message.error)) {
       const { code, message: text, data } = message.error;
-      if (typeof code === 'number') throw new McpError(code, typeof text === 'string' ? text : '', data);
+      // An error the server could not tie to a request carries id null.
+      if (typeof code === 'number' && (message.id === id || message.id === null || message.id === undefined)) {
+        throw new McpError(code, typeof text === 'string' ? text : '', data);
+      }
+    }
+    if (isObject(message) && 'result' in message && message.id !== id) {
+      throw new TransportError(`${method}: response id does not match the request`, status);
     }
     if (status === 401 || status === 403) throw new TransportError(`${method}: HTTP ${status} (check the token)`, status);
     if (status < 200 || status >= 300) throw new TransportError(`${method}: HTTP ${status}`, status);

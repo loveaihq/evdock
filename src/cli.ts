@@ -6,6 +6,7 @@ import { parseArgs } from 'node:util';
 import { startDaemon } from './daemon.js';
 import { describeError, listEvents } from './events-api.js';
 import { Inbox } from './inbox.js';
+import { printable } from './text.js';
 import { clientFromEnv, connect, label, subscribe, unsubscribe, type Context } from './subscriptions.js';
 
 const USAGE = `usage:
@@ -79,7 +80,10 @@ async function main(argv: string[]): Promise<void> {
       const events = await listEvents(await connect(ctx, rest[0]));
       for (const e of events) {
         const usable = e.delivery.includes('webhook') ? '' : '  (no webhook delivery: not usable by evdock)';
-        console.log(`${e.name}  [${e.delivery.join(', ')}]${usable}${e.description ? `\n    ${e.description}` : ''}`);
+        // Names and descriptions come from the server: printed through printable().
+        const modes = e.delivery.map((d) => printable(d, 20)).join(', ');
+        const description = e.description ? `\n    ${printable(e.description, 300)}` : '';
+        console.log(`${printable(e.name, 100)}  [${modes}]${usable}${description}`);
       }
     } finally {
       ctx.inbox.close();
@@ -132,7 +136,7 @@ async function main(argv: string[]): Promise<void> {
             `refreshBefore=${until}`,
             `cursor=${cursor?.cursor ?? '-'}`,
             cursor?.possibleGap ? 'POSSIBLE GAP' : '',
-            sub.lastError ? `lastError=${sub.lastError}` : '',
+            sub.lastError ? `lastError=${printable(sub.lastError)}` : '',
           ]
             .filter(Boolean)
             .join('  '),

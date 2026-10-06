@@ -303,6 +303,32 @@ test('terminated: 200, subscription removed, later deliveries get 404', async (t
   assert.equal((await post(sub, eventJson('late'))).status, 404);
 });
 
+test('ended subscriptions (stopped, unsubscribed, terminated) are no longer receive paths: 404', async (t) => {
+  const { inbox, register, post } = await setup(t);
+  for (const status of ['stopped', 'unsubscribed', 'terminated'] as const) {
+    const sub = register();
+    inbox.setStatus(sub.token, status);
+    assert.equal((await post(sub, eventJson(`evt_${status}`))).status, 404, status);
+    const verification = JSON.stringify({ type: 'verification', challenge: 'c' });
+    assert.equal((await post(sub, verification)).status, 404, `${status}: no handshake either`);
+  }
+});
+
+test('an event of another type than the subscribed one: 400, not stored', async (t) => {
+  const { inbox, register, post } = await setup(t);
+  const sub = register();
+  inbox.deleteSubscription(sub.token);
+  inbox.addSubscription({ token: sub.token, secret: sub.secret, server: 's', eventName: 'incident.created', arguments: '{}', callbackUrl: 'u' });
+  inbox.confirmSubscription(sub.token, sub.subscriptionId);
+  assert.equal((await post(sub, eventJson('evt_ok'))).status, 200, 'eventJson uses incident.created');
+  const other = JSON.stringify({ eventId: 'evt_other', name: 'incident.deleted', timestamp: 't', data: {} });
+  assert.equal((await post(sub, other, { id: 'evt_other' })).status, 400);
+  assert.deepEqual(
+    inbox.messages(sub.token).map((m) => m.eventId),
+    ['evt_ok'],
+  );
+});
+
 test('unknown control type: 200 and stored for the client', async (t) => {
   const { inbox, register, post } = await setup(t);
   const sub = register();

@@ -60,13 +60,33 @@ test('applyGrant activates, saves a non-null cursor, marks truncated, and ignore
   assert.deepEqual(inbox.cursor('a'), { cursor: 'c1', possibleGap: false });
 
   inbox.applyGrant('a', { id: 'sub_a', refreshBefore: 9000, cursor: null, truncated: true }, 2000);
-  assert.deepEqual(inbox.cursor('a'), { cursor: 'c1', possibleGap: true }, 'null cursor kept the saved one');
+  assert.deepEqual(inbox.cursor('a'), { cursor: 'c1', possibleGap: false }, 'null cursor: saved one kept, truncated ignored');
+  inbox.applyGrant('a', { id: 'sub_a', refreshBefore: 9000, cursor: 'c5', truncated: true }, 2000);
+  assert.deepEqual(inbox.cursor('a'), { cursor: 'c5', possibleGap: true });
 
   inbox.setStatus('a', 'terminated', 'gone');
   assert.equal(inbox.applyGrant('a', { id: 'sub_a', refreshBefore: 9999, cursor: 'c2', truncated: false }, 3000), false);
   sub = inbox.getSubscription('a');
   assert.equal(sub?.status, 'terminated');
-  assert.equal(inbox.cursor('a')?.cursor, 'c1');
+  assert.equal(inbox.cursor('a')?.cursor, 'c5');
+});
+
+test('a permanent refresh error or a terminated envelope does not overwrite an already-ended status', (t) => {
+  const { inbox, done } = setup();
+  t.after(done);
+  inbox.addSubscription({ token: 'a', secret: newSecret() });
+  inbox.confirmSubscription('a', 'sub_a');
+  inbox.setStatus('a', 'unsubscribed');
+  inbox.stopSubscription('a', 'Forbidden');
+  put(inbox, 'a', 'msg_terminated_1', { kind: 'terminated', code: -32024, message: 'Forbidden' });
+  assert.equal(inbox.getSubscription('a')?.status, 'unsubscribed');
+  assert.equal(inbox.getSubscription('a')?.lastError, null);
+
+  inbox.addSubscription({ token: 'b', secret: newSecret() });
+  inbox.confirmSubscription('b', 'sub_b');
+  inbox.stopSubscription('b', 'Forbidden -32024');
+  assert.equal(inbox.getSubscription('b')?.status, 'stopped');
+  assert.equal(inbox.getSubscription('b')?.lastError, 'Forbidden -32024');
 });
 
 test('servers: stored by name with the token variable name only', (t) => {

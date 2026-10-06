@@ -4,17 +4,12 @@
 
 import type { Grant } from './inbox.js';
 import { McpError, type McpClient } from './mcp-client.js';
+import { printable } from './text.js';
 
 type Json = Record<string, unknown>;
 
-// The design sketch numbered these -32011..-32015; SEP-3415 renumbered them -32023..-32027
-// (provisional) because the old range is closed to new codes in MCP 2026-07-28.
+// SEP-3415's codes (provisional) plus the JSON-RPC ones we branch on.
 const ERROR_NAMES: Record<number, string> = {
-  [-32011]: 'NotFound',
-  [-32012]: 'Forbidden',
-  [-32013]: 'ResourceExhausted',
-  [-32014]: 'Unsupported',
-  [-32015]: 'CallbackEndpointError',
   [-32023]: 'NotFound',
   [-32024]: 'Forbidden',
   [-32025]: 'ResourceExhausted',
@@ -24,16 +19,34 @@ const ERROR_NAMES: Record<number, string> = {
   [-32601]: 'MethodNotFound',
 };
 
+// The design sketch's numbering, still used by servers written to it (OpenAI's guide uses -32015).
+// MCP 2026-07-28 says receivers MUST NOT assume a meaning for -32000..-32019
+// (docs/spec/mcp-2026-07-28/basic-index.mdx 117-121), so a legacy code only counts when the
+// message or the typed data says the same thing.
+const LEGACY: Record<number, [name: string, agrees: (message: string, data: Record<string, unknown>) => boolean]> = {
+  [-32011]: ['NotFound', (m, d) => /not ?found/i.test(m) || 'kind' in d],
+  [-32012]: ['Forbidden', (m) => /forbidden/i.test(m)],
+  [-32013]: ['ResourceExhausted', (m, d) => /resource ?exhausted/i.test(m) || 'limit' in d],
+  [-32014]: ['Unsupported', (m, d) => /unsupported/i.test(m) || 'feature' in d],
+  [-32015]: ['CallbackEndpointError', (m, d) => /callback/i.test(m) || 'reason' in d],
+};
+
 export function errorName(err: unknown): string | undefined {
-  return err instanceof McpError ? ERROR_NAMES[err.code] : undefined;
+  if (!(err instanceof McpError)) return undefined;
+  const name = ERROR_NAMES[err.code];
+  if (name) return name;
+  const legacy = LEGACY[err.code];
+  const data = typeof err.data === 'object' && err.data !== null ? (err.data as Record<string, unknown>) : {};
+  return legacy && legacy[1](err.message, data) ? legacy[0] : undefined;
 }
 
-/** One-line description of an events error for logs and the CLI: name, code and data.reason/kind. */
+/** One-line description of an error for logs and the CLI: name, code and data.reason/kind. */
 export function describeError(err: unknown): string {
-  if (!(err instanceof McpError)) return (err as Error).message;
+  if (!(err instanceof McpError)) return printable((err as Error).message);
   const data = err.data as { reason?: unknown; kind?: unknown } | undefined;
   const detail = data?.reason ?? data?.kind;
-  return `${ERROR_NAMES[err.code] ?? 'error'} ${err.code}${detail === undefined ? '' : ` (${String(detail)})`}: ${err.message}`;
+  const name = errorName(err) ?? 'error';
+  return `${name} ${err.code}${detail === undefined ? '' : ` (${printable(detail, 40)})`}: ${printable(err.message)}`;
 }
 
 export interface EventType {
@@ -89,10 +102,12 @@ export async function subscribe(client: McpClient, p: SubscribeParams): Promise<
     cursor: p.cursor,
   });
   if (typeof result.id !== 'string' || result.id === '') throw new Error('events/subscribe: response has no id');
+  // Always present; only an explicit null means no expiry. Anything else is a server bug we
+  // should not paper over with a guessed lifetime.
   let refreshBefore: number | null = null;
-  if (typeof result.refreshBefore === 'string') {
-    refreshBefore = Date.parse(result.refreshBefore);
-    if (Number.isNaN(refreshBefore)) throw new Error('events/subscribe: refreshBefore is not a timestamp');
+  if (result.refreshBefore !== null) {
+    refreshBefore = typeof result.refreshBefore === 'string' ? Date.parse(result.refreshBefore) : NaN;
+    if (Number.isNaN(refreshBefore)) throw new Error('events/subscribe: refreshBefore is missing or not a timestamp');
   }
   return {
     id: result.id,

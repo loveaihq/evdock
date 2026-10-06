@@ -84,6 +84,11 @@ export function handleDelivery(
   if (subscriptionIdHeader !== subscription.subscriptionId) {
     return { status: 503, outcome: 'subscription-id-mismatch' };
   }
+  // An event must be of the type this path subscribed to (OpenAI's guide: "The name must match
+  // the subscribed event"). Paths registered without an event name (tests) accept any.
+  if (message.kind === 'event' && subscription.eventName !== null && message.name !== subscription.eventName) {
+    return { status: 400, outcome: 'event-name-mismatch' };
+  }
 
   let result;
   try {

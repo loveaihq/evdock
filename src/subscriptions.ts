@@ -10,6 +10,7 @@ import {
 } from './events-api.js';
 import type { Inbox, Server, Subscription } from './inbox.js';
 import { McpClient, supportsEvents } from './mcp-client.js';
+import { printable } from './text.js';
 
 export interface Context {
   inbox: Inbox;
@@ -42,10 +43,12 @@ export function label(sub: Subscription): string {
 }
 
 function report(ctx: Context, sub: Subscription, result: SubscribeResult): void {
-  if (result.truncated) ctx.log(`${label(sub)}: server skipped events (truncated); marked as a possible gap`);
+  if (result.truncated && result.cursor !== null) {
+    ctx.log(`${label(sub)}: server skipped events (truncated); marked as a possible gap`);
+  }
   const status = result.deliveryStatus;
   if (status?.active === false) {
-    ctx.log(`${label(sub)}: WARNING delivery suspended by the server (lastError=${String(status.lastError)})`);
+    ctx.log(`${label(sub)}: WARNING delivery suspended by the server (lastError=${printable(status.lastError, 40)})`);
   }
   if (status?.throttled === true) ctx.log(`${label(sub)}: server is throttling deliveries`);
 }
@@ -128,7 +131,12 @@ export async function refresh(
     const cursor = ctx.inbox.cursor(sub.token)?.cursor ?? null;
     if (resubscribe && cursor !== null) await callUnsubscribe(client, params);
     const result = await callSubscribe(client, { ...params, cursor });
-    if (!ctx.inbox.applyGrant(sub.token, result, ctx.now())) return 'ended';
+    if (!ctx.inbox.applyGrant(sub.token, result, ctx.now())) {
+      // It ended while this call was in flight (`evdock unsubscribe`, or a terminated envelope),
+      // and the call may have re-created it on the server: unsubscribe so the server stops posting.
+      await callUnsubscribe(client, params).catch(() => {});
+      return 'ended';
+    }
     report(ctx, sub, result);
     const until = result.refreshBefore === null ? 'no expiry' : new Date(result.refreshBefore).toISOString();
     ctx.log(`${resubscribe && cursor !== null ? 'resubscribed' : 'refreshed'} ${label(sub)} until ${until}`);
@@ -136,7 +144,7 @@ export async function refresh(
   } catch (err) {
     const message = describeError(err);
     if (PERMANENT.has(errorName(err) ?? '')) {
-      ctx.inbox.setStatus(sub.token, 'stopped', message);
+      ctx.inbox.stopSubscription(sub.token, message);
       ctx.log(`stopped ${label(sub)}: ${message}`);
       return 'stopped';
     }

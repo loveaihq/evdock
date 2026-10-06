@@ -9,7 +9,8 @@ import { test } from 'node:test';
 import { startDaemon } from '../src/daemon.js';
 import type { Server } from '../src/inbox.js';
 import { McpClient } from '../src/mcp-client.js';
-import { subscribe, unsubscribe, type Context } from '../src/subscriptions.js';
+import { listEvents } from '../src/events-api.js';
+import { connect, subscribe, unsubscribe, type Context } from '../src/subscriptions.js';
 import { startOpenAiServer } from './fixtures/openai-server.js';
 import { tempDir } from './helpers.js';
 
@@ -43,6 +44,13 @@ test('lifecycle against the OpenAI-guide server: subscribe, deliveries, refreshe
   });
   const ctx: Context = { inbox: daemon.inbox, client, now: Date.now, log: (l) => logs.push(l) };
   daemon.inbox.addServer({ name: 'openai', url: server.url, tokenEnv: 'UNUSED' });
+
+  // Discover finds the top-level `events` capability; list returns the guide's event type.
+  const listed = await listEvents(await connect(ctx, 'openai'));
+  assert.deepEqual(
+    listed.map((e) => [e.name, e.delivery]),
+    [['comment.created', ['webhook']]],
+  );
 
   const sub = await subscribe(ctx, {
     server: 'openai',

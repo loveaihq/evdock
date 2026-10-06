@@ -5,7 +5,8 @@ import type { AddressInfo } from 'node:net';
 import { createReceiver } from './http.js';
 import { Inbox, type Server, type Subscription } from './inbox.js';
 import type { McpClient } from './mcp-client.js';
-import { clientFromEnv, connect, refresh, type Context } from './subscriptions.js';
+import { describeError } from './events-api.js';
+import { clientFromEnv, connect, label, refresh, type Context } from './subscriptions.js';
 
 /** Refresh once two thirds of the granted lifetime has passed. */
 const REFRESH_AT = 2 / 3;
@@ -69,16 +70,21 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
 
   const inFlight = new Map<string, Promise<void>>();
   const retry = new Map<string, { failures: number; nextAt: number }>();
+  // Subscriptions still owed the startup resubscribe. The flag stays until it succeeds (or the
+  // subscription stops or ends): a failed attempt must not fall back to a plain refresh, which
+  // would leave the gap open (docs/M2-TASK.md, "规范缺口").
+  const needsResubscribe = new Set<string>();
 
-  function run(sub: Subscription, resubscribe: boolean): Promise<void> {
+  function run(sub: Subscription): Promise<void> {
     const task = (async () => {
       let outcome;
       try {
-        outcome = await refresh(ctx, await clientFor(sub.server ?? ''), sub, resubscribe);
+        outcome = await refresh(ctx, await clientFor(sub.server ?? ''), sub, needsResubscribe.has(sub.token));
       } catch (err) {
         // Could not even connect (discover failed, token missing): retry like a failed refresh.
-        inbox.recordError(sub.token, (err as Error).message);
-        log(`refresh of ${sub.subscriptionId ?? 'subscription'} failed, will retry: ${(err as Error).message}`);
+        const message = describeError(err);
+        inbox.recordError(sub.token, message);
+        log(`refresh of ${label(sub)} failed, will retry: ${message}`);
         outcome = 'failed' as const;
       }
       if (outcome === 'failed') {
@@ -87,6 +93,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
         retry.set(sub.token, { failures, nextAt: now() + delay });
       } else {
         retry.delete(sub.token);
+        needsResubscribe.delete(sub.token);
       }
     })()
       .catch(() => {
@@ -101,7 +108,9 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
 
   // On start, replay from the saved cursor: anything abandoned by the server while we were down
   // would otherwise be lost (docs/M2-TASK.md, "规范缺口").
-  await Promise.all(active().map((sub) => run(sub, true)));
+  const atStart = active();
+  for (const sub of atStart) needsResubscribe.add(sub.token);
+  await Promise.all(atStart.map(run));
 
   let stopped = false;
   const timer = setInterval(() => {
@@ -114,10 +123,14 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
     }
     for (const sub of subs) {
       if (inFlight.has(sub.token)) continue;
-      const due = Math.max(refreshDue(sub), retry.get(sub.token)?.nextAt ?? 0);
-      if (now() >= due) void run(sub, false);
+      const retryAt = retry.get(sub.token)?.nextAt ?? 0;
+      // A pending resubscribe goes on the backoff alone, not at the normal refresh point.
+      const due = needsResubscribe.has(sub.token) ? retryAt : Math.max(refreshDue(sub), retryAt);
+      if (now() >= due) void run(sub);
     }
   }, options.tickMs ?? 1000);
+  // The receiver keeps `serve` alive; the timer alone should not.
+  timer.unref();
 
   return {
     url,

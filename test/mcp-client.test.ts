@@ -83,6 +83,42 @@ test('a stream that ends without the response is re-issued once with a new id', 
   assert.notEqual(seen[0]!.body.id, seen[1]!.body.id);
 });
 
+test('a stream cut off abruptly (connection reset) is re-issued too', async (t) => {
+  const { url, seen } = await stub(t, [
+    (_seen, res) => {
+      res.writeHead(200, { 'content-type': 'text/event-stream' });
+      res.write('data: {"jsonrpc":"2.0",');
+      setTimeout(() => res.socket?.destroy(), 10);
+    },
+    json({ second: true }),
+  ]);
+  const result = await new McpClient({ url, token: 't' }).request('events/subscribe');
+  assert.equal(result.second, true);
+  assert.equal(seen.length, 2);
+});
+
+test('SSE details: media type in any case, a bare "data" line, and a response with the wrong id', async (t) => {
+  const { url } = await stub(t, [
+    (seen, res) => {
+      res.writeHead(200, { 'content-type': 'Text/Event-Stream; charset=utf-8' });
+      res.end(`data: {"jsonrpc":"2.0","id":${seen.body.id},\ndata\ndata: "result":{"ok":1}}\n\n`);
+    },
+    (seen, res) =>
+      res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify({ jsonrpc: '2.0', id: seen.body.id + 100, result: {} })),
+  ]);
+  const client = new McpClient({ url, token: 't' });
+  assert.equal((await client.request('x')).ok, 1);
+  await assert.rejects(client.request('x'), /response id does not match/);
+});
+
+test('events/subscribe: a missing refreshBefore is an error, not "no expiry"', async (t) => {
+  const { url } = await stub(t, [json({ id: 'sub_1', cursor: null })]);
+  await assert.rejects(
+    subscribe(new McpClient({ url, token: 't' }), { name: 'e', arguments: {}, url: 'u', secret: 's', cursor: null }),
+    /refreshBefore is missing/,
+  );
+});
+
 test('JSON-RPC errors become McpError; HTTP failures become TransportError', async (t) => {
   const { url } = await stub(t, [
     error(400, -32022, 'Unsupported protocol version', { supported: ['2025-11-25'], requested: '2026-07-28' }),
@@ -151,8 +187,20 @@ test('events/subscribe sends the webhook delivery and parses the grant', async (
 });
 
 test('error names cover both numberings; NotFound on unsubscribe counts as success', async (t) => {
-  for (const code of [-32011, -32023]) assert.equal(errorName(new McpError(code, '')), 'NotFound');
-  for (const code of [-32015, -32027]) assert.equal(errorName(new McpError(code, '')), 'CallbackEndpointError');
+  assert.equal(errorName(new McpError(-32023, '')), 'NotFound');
+  assert.equal(errorName(new McpError(-32027, '')), 'CallbackEndpointError');
+  // Legacy codes (-32000..-32019 carry no agreed meaning) count only when message or data agrees.
+  assert.equal(errorName(new McpError(-32011, 'NotFound', { kind: 'subscription' })), 'NotFound');
+  assert.equal(errorName(new McpError(-32011, 'x', { kind: 'event' })), 'NotFound');
+  assert.equal(errorName(new McpError(-32012, 'Forbidden')), 'Forbidden');
+  assert.equal(errorName(new McpError(-32015, 'CallbackEndpointError', { reason: 'challenge_failed' })), 'CallbackEndpointError');
+  assert.equal(errorName(new McpError(-32012, 'database busy')), undefined, 'some other implementation-defined error');
+  assert.equal(errorName(new McpError(-32011, '')), undefined);
+  assert.equal(
+    describeError(new McpError(-32024, 'line1\nline2\u001b[31m')),
+    'Forbidden -32024: line1?line2?[31m',
+    'server text is made printable',
+  );
   assert.equal(
     describeError(new McpError(-32027, 'verification failed', { reason: 'challenge_failed' })),
     'CallbackEndpointError -32027 (challenge_failed): verification failed',

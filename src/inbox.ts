@@ -4,6 +4,7 @@
 
 import { DatabaseSync } from 'node:sqlite';
 import type { Message } from './classify.js';
+import { printable } from './text.js';
 
 /**
  * pending: path registered, events/subscribe not answered yet (verification is echoed, events get 503).
@@ -218,10 +219,13 @@ export class Inbox {
 
   /**
    * Records a subscribe/refresh response: the subscription becomes active under the returned id,
-   * a non-null cursor is saved, and truncated marks a possible gap. Ignored (returns false) if the
-   * subscription ended meanwhile, e.g. a terminated envelope arrived during the call.
+   * a non-null cursor is saved, and truncated marks a possible gap. truncated with a null cursor
+   * is ignored: the type has no replay, so there is no position to have skipped past (SEP 709).
+   * Ignored altogether (returns false) if the subscription ended meanwhile, e.g. a terminated
+   * envelope arrived or `evdock unsubscribe` ran during the call.
    */
   applyGrant(token: string, grant: Grant, nowMs = Date.now()): boolean {
+    const gap = grant.truncated && grant.cursor !== null;
     this.db.exec('BEGIN IMMEDIATE');
     try {
       const updated = this.db
@@ -231,14 +235,14 @@ export class Inbox {
            WHERE token = ? AND status IN ('pending', 'active')`,
         )
         .run(grant.id, grant.refreshBefore, nowMs, token);
-      if (updated.changes > 0 && (grant.cursor !== null || grant.truncated)) {
+      if (updated.changes > 0 && grant.cursor !== null) {
         this.db
           .prepare(
             `INSERT INTO cursors (token, cursor, possible_gap, updated_at) VALUES (?, ?, ?, ?)
-             ON CONFLICT (token) DO UPDATE SET cursor = coalesce(excluded.cursor, cursors.cursor),
+             ON CONFLICT (token) DO UPDATE SET cursor = excluded.cursor,
                possible_gap = max(cursors.possible_gap, excluded.possible_gap), updated_at = excluded.updated_at`,
           )
-          .run(token, grant.cursor, grant.truncated ? 1 : 0, nowMs);
+          .run(token, grant.cursor, gap ? 1 : 0, nowMs);
       }
       this.db.exec('COMMIT');
       return updated.changes > 0;
@@ -252,8 +256,16 @@ export class Inbox {
     }
   }
 
+  /** Sets the status unconditionally: for the user's own actions, such as `evdock unsubscribe`. */
   setStatus(token: string, status: SubscriptionStatus, lastError: string | null = null): void {
     this.db.prepare('UPDATE subscriptions SET status = ?, last_error = ? WHERE token = ?').run(status, lastError, token);
+  }
+
+  /** Stops an active subscription after a permanent refresh error. Leaves an already-ended one (and its reason) alone. */
+  stopSubscription(token: string, lastError: string): void {
+    this.db
+      .prepare("UPDATE subscriptions SET status = 'stopped', last_error = ? WHERE token = ? AND status = 'active'")
+      .run(lastError, token);
   }
 
   /** Notes a failed refresh without changing the status. */
@@ -336,8 +348,8 @@ export class Inbox {
         // reason can be seen and the subscription re-created; the stored message is the notice for
         // the output side; the cursor is kept for a resubscribe.
         this.db
-          .prepare("UPDATE subscriptions SET status = 'terminated', last_error = ? WHERE token = ?")
-          .run(`terminated: ${message.code} ${message.message}`.slice(0, 200), token);
+          .prepare("UPDATE subscriptions SET status = 'terminated', last_error = ? WHERE token = ? AND status = 'active'")
+          .run(printable(`terminated: ${message.code} ${message.message}`), token);
       }
 
       this.db.exec('COMMIT');
