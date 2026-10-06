@@ -19,6 +19,22 @@ async function until(what: string, condition: () => boolean, timeoutMs = 10_000)
   }
 }
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+function alive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    return (err as NodeJS.ErrnoException).code === 'EPERM';
+  }
+}
+type Mode = 'ok' | 'fail' | 'hang' | 'hang-tree' | 'trap';
+interface Run {
+  argv: string[];
+  stdin: { subscription: Record<string, unknown>; messages: Array<Record<string, unknown>> };
+  pid: number;
+  childPid?: number;
+  env: string[];
+}
 
 function setup(t: { after: (fn: () => Promise<void> | void) => void }) {
   const { dir, cleanup } = tempDir();
@@ -51,15 +67,24 @@ function setup(t: { after: (fn: () => Promise<void> | void) => void }) {
       const payload = body ?? { eventId: `evt_${seq}`, name: 'incident.created', timestamp: 't', data: message };
       inbox.store({ token: TOKEN, subscriptionId: 'sub_actions', webhookId: `wh_${seq}`, message: m, body: Buffer.from(JSON.stringify(payload)), receivedAtMs: clock });
     },
-    action(mode: 'ok' | 'fail' | 'hang', { maxPerHour = 6, windowMs = 0, extra = [] as string[] } = {}) {
+    action(mode: Mode, { maxPerHour = 6, windowMs = 0, extra = [] as string[] } = {}) {
       inbox.setAction(TOKEN, [process.execPath, STUB, record, mode, ...extra], maxPerHour, windowMs);
+    },
+    /**
+     * A command whose work runs in a grandchild of evdock. On Windows that is README's recipe,
+     * cmd.exe /c in front of the agent (Node's own children die with it anyway, cmd's do not);
+     * elsewhere the stub starts a child of its own.
+     */
+    treeAction() {
+      if (process.platform === 'win32') inbox.setAction(TOKEN, ['cmd.exe', '/d', '/s', '/c', 'node', STUB, record, 'hang'], 6, 0);
+      else inbox.setAction(TOKEN, [process.execPath, STUB, record, 'hang-tree'], 6, 0);
     },
     start(options: ActionRunnerOptions = {}) {
       const runner = startActionRunner(inbox, { now: () => clock, log: (l) => logs.push(l), tickMs: 20, ...options });
       runners.push(runner);
       return runner;
     },
-    runs(): Array<{ argv: string[]; stdin: { subscription: Record<string, unknown>; messages: Array<Record<string, unknown>> } }> {
+    runs(): Run[] {
       return existsSync(record)
         ? readFileSync(record, 'utf8').trim().split('\n').filter(Boolean).map((l) => JSON.parse(l))
         : [];
@@ -138,6 +163,83 @@ test('a command that hangs past the timeout is ended and counts as a failure', a
   s.put({ n: 1 });
   await until('failure recorded', () => s.inbox.listActions()[0]!.failures === 1, 5000);
   assert.ok(s.logs.some((l) => l.includes('timed out after 300 ms')));
+});
+
+test('a timeout ends the processes the command started too', async (t) => {
+  const s = setup(t);
+  s.treeAction();
+  s.start({ timeoutMs: 300 });
+  s.put({ n: 1 });
+  await until('failure recorded', () => s.inbox.listActions()[0]!.failures === 1, 5000);
+  const { pid, childPid } = s.runs()[0]!;
+  await until('everything it started is gone', () => !alive(pid) && !(childPid && alive(childPid)), 5000);
+});
+
+test('POSIX: a command that ignores SIGTERM is killed after the grace period', { skip: process.platform === 'win32' && 'POSIX only' }, async (t) => {
+  const s = setup(t);
+  s.action('trap');
+  s.start({ timeoutMs: 300, killGraceMs: 300 });
+  s.put({ n: 1 });
+  await until('failure recorded', () => s.inbox.listActions()[0]!.failures === 1, 5000);
+  assert.ok(!alive(s.runs()[0]!.pid));
+});
+
+test('POSIX: stopping does not hang on a command that ignores SIGTERM', { skip: process.platform === 'win32' && 'POSIX only' }, async (t) => {
+  const s = setup(t);
+  s.action('trap');
+  const runner = s.start({ killGraceMs: 300 });
+  s.put({ n: 1 });
+  await until('started', () => s.runs().length === 1);
+  const started = Date.now();
+  await runner.stop();
+  assert.ok(Date.now() - started < 3000, 'stop() returned');
+  await until('gone', () => !alive(s.runs()[0]!.pid), 3000);
+});
+
+test('stopping ends the processes the command started too', async (t) => {
+  const s = setup(t);
+  s.treeAction();
+  const runner = s.start();
+  s.put({ n: 1 });
+  await until('started', () => s.runs().length === 1);
+  await runner.stop();
+  const { pid, childPid } = s.runs()[0]!;
+  await until('everything it started is gone', () => !alive(pid) && !(childPid && alive(childPid)), 5000);
+});
+
+test('the command does not see server tokens or the relay key', async (t) => {
+  const s = setup(t);
+  const names = ['EVDOCK_TEST_SERVER_TOKEN', 'EVDOCK_TEST_RELAY_KEY', 'EVDOCK_TEST_OTHER'];
+  for (const name of names) process.env[name] = 'value';
+  t.after(() => {
+    for (const name of names) delete process.env[name];
+  });
+  s.inbox.addServer({ name: 'gh', url: 'https://mcp.example.invalid/mcp', tokenEnv: 'EVDOCK_TEST_SERVER_TOKEN' });
+  // Windows variable names ignore case, so a differently cased setting still names the same variable.
+  s.inbox.setRelay({ url: 'https://relay.example.invalid', keyEnv: process.platform === 'win32' ? 'evdock_test_relay_key' : 'EVDOCK_TEST_RELAY_KEY' });
+  s.action('ok');
+  s.start();
+  s.put({ n: 1 });
+  await until('one run', () => s.runs().length === 1);
+  const env = s.runs()[0]!.env.map((n) => n.toUpperCase());
+  assert.ok(!env.includes('EVDOCK_TEST_SERVER_TOKEN'), 'server token hidden');
+  assert.ok(!env.includes('EVDOCK_TEST_RELAY_KEY'), 'relay key hidden');
+  assert.ok(env.includes('EVDOCK_TEST_OTHER'), 'the rest of the environment is passed on');
+});
+
+test('a new command line starts retries afresh; the same command line keeps its back-off', async (t) => {
+  const s = setup(t);
+  s.action('fail');
+  s.start({ retryDelaysMs: [60_000] });
+  s.put({ n: 1 });
+  await until('failure recorded', () => s.inbox.listActions()[0]!.failures === 1);
+  s.action('fail', { maxPerHour: 3 });
+  assert.equal(s.inbox.listActions()[0]!.failures, 1, 'same command: still backing off');
+  assert.ok(s.inbox.listActions()[0]!.retryAt > 0);
+  s.action('ok');
+  assert.deepEqual([s.inbox.listActions()[0]!.failures, s.inbox.listActions()[0]!.retryAt], [0, 0]);
+  await until('runs again without waiting out the back-off', () => s.runs().length === 2);
+  await until('done', () => s.inbox.listActions()[0]!.doneSeq === 1);
 });
 
 test('stopping ends a running command; its batch runs again on the next start (at least once)', async (t) => {

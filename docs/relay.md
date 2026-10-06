@@ -15,7 +15,15 @@
 node -e "console.log(require('crypto').randomBytes(32).toString('base64url'))"
 ```
 
-两边都放在环境变量里，不写进任何文件。下面用 `EVDOCK_RELAY_KEY` 作变量名。
+两边都放在环境变量里，不写进任何文件。下面用 `EVDOCK_RELAY_KEY` 作变量名，在跑命令的那个终端里设好：
+
+| 终端 | 设置 |
+|---|---|
+| bash / zsh | `export EVDOCK_RELAY_KEY=<中继密钥>` |
+| PowerShell | `$env:EVDOCK_RELAY_KEY = "<中继密钥>"` |
+| cmd | `set EVDOCK_RELAY_KEY=<中继密钥>` |
+
+下面的命令和 README 一样，在仓库目录里用 `node dist/src/cli.js` 运行（先 `npm run build`）。正文里说的 `evdock <命令>` 就是 `node dist/src/cli.js <命令>`。
 
 ## 跑法一：Cloudflare Worker
 
@@ -52,7 +60,7 @@ node -e "console.log(require('crypto').randomBytes(32).toString('base64url'))"
 ## 跑法二：Node 主机
 
 ```bash
-EVDOCK_RELAY_KEY=<中继密钥> evdock relay serve --key-env EVDOCK_RELAY_KEY --host 127.0.0.1 --port 8788 --db relay.db
+node dist/src/cli.js relay serve --key-env EVDOCK_RELAY_KEY --host 127.0.0.1 --port 8788 --db relay.db
 ```
 
 - 中继只提供明文 HTTP。MCP 服务端只往 https 地址投递，所以前面要有一层 TLS，比如反向代理（Caddy、nginx）或者隧道。
@@ -62,8 +70,8 @@ EVDOCK_RELAY_KEY=<中继密钥> evdock relay serve --key-env EVDOCK_RELAY_KEY --
 ## 守护进程连上中继
 
 ```bash
-evdock relay use https://<中继地址> --key-env EVDOCK_RELAY_KEY
-EVDOCK_RELAY_KEY=<中继密钥> evdock serve
+node dist/src/cli.js relay use https://<中继地址> --key-env EVDOCK_RELAY_KEY
+node dist/src/cli.js serve
 ```
 
 - 此后 `evdock subscribe` 默认把回调地址设在中继上，并在中继登记这条路径。

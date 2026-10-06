@@ -12,9 +12,18 @@ import { parseArgs } from 'node:util';
 const { values } = parseArgs({
   options: { port: { type: 'string', default: '8790' }, every: { type: 'string', default: '15' } },
 });
-const { startMockServer } = await import(new URL('../dist/src/conformance/mock-server.js', import.meta.url).href).catch(() => {
-  console.error('dist/ is missing: run `npm run build` first.');
-  process.exit(1);
+const every = Number(values.every);
+if (!/^[0-9]+(\.[0-9]+)?$/.test(values.every) || every < 1) {
+  console.error('--every must be a number of seconds, 1 or more');
+  process.exit(2);
+}
+const MOCK = new URL('../dist/src/conformance/mock-server.js', import.meta.url);
+const { startMockServer } = await import(MOCK.href).catch((err) => {
+  if (err?.code === 'ERR_MODULE_NOT_FOUND' && err.message.includes('mock-server.js')) {
+    console.error('dist/ is missing: run `npm run build` first.');
+    process.exit(1);
+  }
+  throw err;
 });
 
 const TOKEN = 'demo-token';
@@ -36,10 +45,14 @@ const server = await startMockServer({
   defaultTtlMs: 10 * 60 * 1000,
   retry: { attempts: 5, baseDelayMs: 1000 },
   allowInsecureCallbacks: true,
+}).catch((err) => {
+  if (err?.code !== 'EADDRINUSE') throw err;
+  console.error(`port ${values.port} is in use: is the demo server already running? Otherwise pick another with --port.`);
+  process.exit(1);
 });
 
 console.log(`demo MCP server: ${server.url}  (bearer token: ${TOKEN})`);
-console.log(`making up an incident every ${values.every} s; Ctrl+C to stop`);
+console.log(`making up an incident every ${every} s; Ctrl+C to stop`);
 
 const titles = ['Database connection pool exhausted', 'Checkout latency above 2 s', 'Disk 90% full on web-3', 'Certificate expires in 5 days'];
 let n = 0;
@@ -49,6 +62,6 @@ setInterval(() => {
   const { eventId } = server.emit('incident.created', incident);
   const subscribers = server.subscriptions().length;
   console.log(`emitted ${eventId}: ${incident.id} ${incident.severity} "${incident.title}" -> ${subscribers} subscription(s)`);
-}, Number(values.every) * 1000);
+}, every * 1000);
 
 process.on('SIGINT', () => void server.close().then(() => process.exit(0)));

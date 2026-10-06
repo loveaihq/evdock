@@ -13,7 +13,7 @@
   - 未确认的 id 回 503/425，538 行
   - 签名和时间戳，634–641 行
 - DESIGN.md 里中继的部分。
-- Cloudflare 免费层的事实，2026-10-06 按官方文档核实，原文存在 scratchpad：
+- Cloudflare 免费层的事实，2026-10-06 按官方文档核实，原文快照在 `docs/spec/cloudflare-2026-10-06/`：
   - Workers：每天 10 万次请求，每次 10 ms CPU，等待不算 CPU，超额返回错误、不收费。
   - SQLite 版 Durable Object 免费层可用：每天 10 万次请求、1.3 万 GB-s 时长、10 万行写入，单行最大 2 MB。
   - 存储写入要落盘之后响应才会发出去（output gate）。

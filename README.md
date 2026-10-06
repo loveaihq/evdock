@@ -96,7 +96,7 @@ action sub_063431ee160dc7d5: running node with 1 message(s)
 action sub_063431ee160dc7d5: done in 130 ms
 ```
 
-The action waits 10 seconds after the first new event before waking the agent, so a burst of events wakes it once. It wakes the agent at most 6 times an hour. Events that arrive over that limit are not dropped: they wait and go to the agent together in the next run. With an incident every 15 seconds, the hourly limit is reached after a few minutes.
+The action waits 10 seconds after the first new event before waking the agent, so a burst of events wakes it once. It wakes the agent at most 6 times an hour. Events that arrive over that limit are not dropped: they wait and go to the agent in the next run, up to 100 messages per run. With an incident every 15 seconds, the hourly limit is reached after a few minutes.
 
 To stop, you can first run `node dist/src/cli.js unsubscribe <subscription-id>` in terminal 3 (optional), then press Ctrl+C in terminals 1 and 2. The demo leaves `evdock.db` in the repository root, sometimes with `evdock.db-wal` and `evdock.db-shm` next to it. They are ignored by git and safe to delete.
 
@@ -149,9 +149,12 @@ node dist/src/cli.js action set <subscription-id> [--window 10] [--max-per-hour 
   }
   ```
   `kind` can also be `gap` (events may have been missed), `terminated` (the server ended the subscription) or `unknown_control`.
-- A run succeeds when the command exits with code 0. On failure the batch is retried after 1, 5 and 15 minutes, then skipped with a warning in the log.
-- A run longer than 30 minutes is ended and counts as a failure.
+- A run succeeds when the command exits with code 0. On failure the batch is retried after 1, 5 and 15 minutes, then skipped with a warning in the log. Retries count toward the hourly limit, so with a low `--max-per-hour` they come later. Messages that arrive in the meantime join the batch, and are skipped with it if the last attempt fails too. Setting a different command line with `action set` starts the retries afresh.
+- A run longer than 30 minutes is ended, together with any processes it started, and counts as a failure.
 - Delivery to the command is at least once. If `serve` stops mid-run, the batch runs again on the next start. Deduplicate on `eventId` if that matters to you.
+- After `unsubscribe`, messages that were already waiting still go to the command. Run `action clear` first if you don't want that.
+- The command runs in the directory you started `serve` from. It gets evdock's environment, minus the variables named by `--token-env` and `--key-env`. If your agent can read files, keep `evdock.db` out of its reach: it holds the signing secrets. Use `--db <path>` to put it elsewhere.
+- Don't put secrets in the command line. It is stored in `evdock.db` and printed by `actions`.
 
 **Example: Claude Code.** On macOS or Linux:
 
@@ -190,7 +193,7 @@ Every command takes `--db <file>`. The default is `evdock.db` in the current dir
 - **The relay holds no secrets.** It can read event content, but it cannot produce a delivery that passes verification. It echoes the verification handshake only for paths your daemon registered, and it does not publish a well-known receiver document, because that would let anyone subscribe your relay.
 - **Event content is untrusted.** It can contain prompt injection. Actions get it only on stdin, never on a command line or through a shell. Tell your agent to treat it as data.
 - **An event is not an authorization.** An agent woken by an event acts with its own permissions, through its own approval flow.
-- **Credentials stay in the environment.** Tokens and the relay key are read from environment variables. Only the variable names are stored, and logs never contain secrets, keys or event bodies.
+- **Credentials stay in the environment.** Tokens and the relay key are read from environment variables. Only the variable names are stored, and actions don't get these variables. evdock's own log lines never contain secrets, keys or event bodies. An action's output goes to the same terminal, and what it prints is up to it.
 
 ## Conformance tools
 
@@ -214,6 +217,7 @@ It is what evdock's own client tests use.
 
 - **A spec gap.** Suppose the receiver is unreachable for longer than the server's retry window, while the subscription has not yet expired. Events abandoned during that time are then skipped without any signal to the client. evdock works around this when the daemon starts: it unsubscribes and resubscribes from its saved cursor. Reported upstream as [experimental-ext-triggers-events#9](https://github.com/modelcontextprotocol/experimental-ext-triggers-events/issues/9).
 - **Long relay outages.** If the relay itself is unavailable for a long time (for example, when Cloudflare's free daily quota runs out), restart `serve` afterwards. The restart triggers the same resubscribe, which recovers what the server gave up on.
+- **Actions are not told about every possible gap.** When a resubscribe comes back `truncated` (the server could not replay everything since the saved cursor), `subscriptions` shows `POSSIBLE GAP`. The action only gets the `gap` messages the server itself sends.
 - **Webhook delivery only.** The poll and push delivery modes are not consumed. There is no local MCP server that re-offers events to Events-capable agents yet.
 - **The spec is a moving draft.** Error codes, capability placement and more may change. The design notes in `docs/` (in Chinese) record every choice made where the spec is unclear.
 

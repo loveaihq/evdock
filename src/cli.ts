@@ -93,6 +93,8 @@ async function main(argv: string[]): Promise<void> {
     allowPositionals: true,
   });
   const [command, ...rest] = positionals;
+  const actionSet = command === 'action' && rest[0] === 'set';
+  if (dashDash !== -1 && !actionSet) throw new UsageError('`--` is only used by `action set`');
   const relayServe = command === 'relay' && rest[0] === 'serve';
   const values = { ...given, db: given.db ?? (relayServe ? 'relay.db' : 'evdock.db') };
 
@@ -211,12 +213,17 @@ async function main(argv: string[]): Promise<void> {
     return;
   }
 
-  if (command === 'action' && rest[0] === 'set' && rest[1]) {
+  if (actionSet && rest[1]) {
+    if (rest.length > 2) throw new UsageError(`unexpected ${JSON.stringify(rest.slice(2).join(' '))}: the command goes after --`);
     if (commandLine.length === 0 || !commandLine[0]) throw new UsageError('action set needs a command after --');
-    const maxPerHour = Number(values['max-per-hour'] ?? DEFAULT_MAX_PER_HOUR);
-    const windowSeconds = Number(values.window ?? DEFAULT_WINDOW_MS / 1000);
-    if (!Number.isInteger(maxPerHour) || maxPerHour < 1) throw new UsageError('--max-per-hour must be a whole number, 1 or more');
-    if (!Number.isFinite(windowSeconds) || windowSeconds < 0) throw new UsageError('--window must be a number of seconds, 0 or more');
+    const maxPerHourText = values['max-per-hour'] ?? String(DEFAULT_MAX_PER_HOUR);
+    const windowText = values.window ?? String(DEFAULT_WINDOW_MS / 1000);
+    if (!/^[0-9]+$/.test(maxPerHourText) || Number(maxPerHourText) < 1) {
+      throw new UsageError('--max-per-hour must be a whole number, 1 or more');
+    }
+    if (!/^[0-9]+(\.[0-9]+)?$/.test(windowText)) throw new UsageError('--window must be a number of seconds, 0 or more');
+    const maxPerHour = Number(maxPerHourText);
+    const windowSeconds = Number(windowText);
     const inbox = new Inbox(values.db);
     try {
       const sub = inbox.findSubscription(rest[1]);
@@ -249,7 +256,7 @@ async function main(argv: string[]): Promise<void> {
     try {
       for (const action of inbox.listActions()) {
         const sub = inbox.getSubscription(action.token);
-        const waiting = inbox.messagesAfter(action.token, action.doneSeq, 1000).length;
+        const waiting = inbox.pendingAfter(action.token, action.doneSeq).count;
         console.log(
           [
             sub ? label(sub) : `${action.token.slice(0, 6)}…`,

@@ -256,7 +256,8 @@ export class Inbox {
 
   /**
    * Sets the action for a subscription. A new action starts after the messages already in the
-   * inbox: it reacts to what arrives from now on, not to history. Replacing an action keeps its progress.
+   * inbox: it reacts to what arrives from now on, not to history. Replacing an action keeps its
+   * progress; a new command line also gets a fresh start on retries (it may be the fixed script).
    */
   setAction(token: string, argv: string[], maxPerHour: number, windowMs: number): void {
     const latest = this.db.prepare('SELECT coalesce(max(seq), 0) AS seq FROM events WHERE token = ?').get(token) as { seq: number };
@@ -264,7 +265,9 @@ export class Inbox {
       .prepare(
         `INSERT INTO actions (token, argv, max_per_hour, window_ms, done_seq) VALUES (?, ?, ?, ?, ?)
          ON CONFLICT (token) DO UPDATE SET argv = excluded.argv, max_per_hour = excluded.max_per_hour,
-           window_ms = excluded.window_ms`,
+           window_ms = excluded.window_ms,
+           failures = CASE WHEN argv = excluded.argv THEN failures ELSE 0 END,
+           retry_at = CASE WHEN argv = excluded.argv THEN retry_at ELSE 0 END`,
       )
       .run(token, JSON.stringify(argv), maxPerHour, windowMs, latest.seq);
   }
@@ -300,6 +303,21 @@ export class Inbox {
     return this.messageRows('WHERE token = ? AND seq > ? ORDER BY seq LIMIT ?', token, afterSeq, limit);
   }
 
+  /** How many messages wait after `afterSeq`, and when the oldest of them arrived (without loading bodies). */
+  pendingAfter(token: string, afterSeq: number): { count: number; oldestReceivedAt: number | null } {
+    const row = this.db
+      .prepare('SELECT count(*) AS count, min(received_at) AS oldest FROM events WHERE token = ? AND seq > ?')
+      .get(token, afterSeq) as { count: number; oldest: number | null };
+    return { count: row.count, oldestReceivedAt: row.oldest };
+  }
+
+  /** The variables holding server tokens and the relay key: kept away from action commands. */
+  secretEnvNames(): string[] {
+    const servers = this.db.prepare('SELECT DISTINCT token_env FROM servers').all() as Array<{ token_env: string }>;
+    const relay = this.getRelay();
+    return [...servers.map((s) => s.token_env), ...(relay ? [relay.keyEnv] : [])];
+  }
+
   /** The batch up to `seq` is finished (handed over, or given up on): move on and clear failures. */
   finishActionBatch(token: string, seq: number): void {
     this.db.prepare('UPDATE actions SET done_seq = ?, failures = 0, retry_at = 0 WHERE token = ?').run(seq, token);
@@ -309,19 +327,21 @@ export class Inbox {
     this.db.prepare('UPDATE actions SET failures = ?, retry_at = ? WHERE token = ?').run(failures, retryAt, token);
   }
 
-  /** Records a run, for the per-hour limit. Persisted, so restarting the daemon does not reset the count. */
-  recordActionRun(token: string, at: number): void {
+  /**
+   * Records a run, for the per-hour limit. Persisted, so restarting the daemon does not reset the
+   * count. Runs at or before `forgetBefore` no longer count and are deleted.
+   */
+  recordActionRun(token: string, at: number, forgetBefore: number): void {
+    this.db.prepare('DELETE FROM action_runs WHERE token = ? AND started_at <= ?').run(token, forgetBefore);
     this.db.prepare('INSERT INTO action_runs (token, started_at) VALUES (?, ?)').run(token, at);
   }
 
-  /** Start times of runs after `since`, oldest first (a run counts for exactly an hour); older ones are deleted. */
-  actionRunsSince(token: string, since: number): number[] {
-    this.db.prepare('DELETE FROM action_runs WHERE token = ? AND started_at <= ?').run(token, since);
-    return (
-      this.db.prepare('SELECT started_at FROM action_runs WHERE token = ? ORDER BY started_at').all(token) as Array<{
-        started_at: number;
-      }>
-    ).map((r) => r.started_at);
+  /** How many runs started after `since` (a run counts for exactly an hour). */
+  countActionRuns(token: string, since: number): number {
+    const row = this.db.prepare('SELECT count(*) AS count FROM action_runs WHERE token = ? AND started_at > ?').get(token, since) as {
+      count: number;
+    };
+    return row.count;
   }
 
   getServer(name: string): Server | undefined {

@@ -106,7 +106,8 @@ export function relayScenarios(startRelay: StartRelay): void {
 
     const sent = [s.mock.emit('incident.created', { n: 1 }).eventId, s.mock.emit('incident.created', { n: 2 }).eventId];
     await until('both events', () => eventIds(daemon, sub.token).length === 2);
-    assert.deepEqual(eventIds(daemon, sub.token), sent);
+    // The mock sends deliveries concurrently and webhooks promise no order: compare as sets.
+    assert.deepEqual(eventIds(daemon, sub.token).sort(), [...sent].sort());
     assert.ok(s.logs.some((l) => l.startsWith('200 stored-event') && l.includes('(relay #')), 'verified and stored by the daemon');
     // The ack goes out right after the store; give it a moment, then the relay must be empty.
     let left = (await s.relay.fetchDeliveries()).deliveries.length;

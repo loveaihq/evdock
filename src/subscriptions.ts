@@ -66,7 +66,8 @@ export async function confirmPath(ctx: Context, sub: Subscription): Promise<void
 
 /** How a subscription is named in logs and CLI output: never the secret, never the full path token. */
 export function label(sub: Subscription): string {
-  return sub.subscriptionId ?? `${sub.token.slice(0, 6)}…`;
+  // The subscription id comes from the server.
+  return sub.subscriptionId ? printable(sub.subscriptionId, 100) : `${sub.token.slice(0, 6)}…`;
 }
 
 function report(ctx: Context, sub: Subscription, result: SubscribeResult): void {

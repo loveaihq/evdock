@@ -75,6 +75,17 @@ test('action set / actions / action clear', async (t) => {
   assert.equal(r.code, 2, 'no command');
   r = await evdock('action', 'set', 'sub_cli', '--max-per-hour', '0', '--db', db, '--', 'x');
   assert.equal(r.code, 2);
+  for (const window of ['', '0x10', '1e3', 'ten']) {
+    r = await evdock('action', 'set', 'sub_cli', '--window', window, '--db', db, '--', 'x');
+    assert.equal(r.code, 2, `--window ${JSON.stringify(window)}`);
+  }
+  r = await evdock('action', 'set', 'sub_cli', 'extra', 'words', '--db', db, '--', 'x');
+  assert.equal(r.code, 2, 'words before -- are not the command');
+  assert.match(r.out, /the command goes after --/);
+  r = await evdock('serve', '--db', db, '--', 'x');
+  assert.equal(r.code, 2, '-- belongs to action set only');
+  r = await evdock('actions', '--db', db);
+  assert.match(r.out, /\["node","agent\.mjs","--flag","--db"\]/, 'refused commands changed nothing');
   r = await evdock('action', 'clear', 'sub_cli', '--db', db);
   assert.match(r.out, /action for sub_cli removed/);
 });
