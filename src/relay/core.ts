@@ -191,7 +191,7 @@ async function readCapped(request: Request, max: number): Promise<Uint8Array | '
 function verificationChallenge(body: Uint8Array): string | undefined {
   if (body.length > MAX_VERIFICATION_BYTES) return undefined;
   try {
-    const parsed = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(body)) as unknown;
+    const parsed = JSON.parse(new TextDecoder('utf-8', { fatal: true, ignoreBOM: false }).decode(body)) as unknown;
     if (typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)) {
       const { type, challenge } = parsed as Record<string, unknown>;
       if (type === 'verification' && typeof challenge === 'string') return challenge;
