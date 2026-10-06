@@ -5,6 +5,7 @@
 // run without a shell; event content only ever reaches the command through stdin.
 
 import { spawn, type ChildProcess } from 'node:child_process';
+import { win32 } from 'node:path';
 import type { Action, Inbox, MessageRow } from './inbox.js';
 import { printable } from './text.js';
 
@@ -96,18 +97,26 @@ function endTree(child: ChildProcess, graceMs: number): void {
   if (pid === undefined || child.exitCode !== null || child.signalCode !== null) return;
   if (process.platform === 'win32') {
     // /T: the whole tree. /F: console programs get no gentler signal that works reliably.
-    spawn('taskkill', ['/pid', String(pid), '/T', '/F'], { stdio: 'ignore', windowsHide: true }).once('error', () => child.kill());
+    // By full path: a bare name would be looked up in the current directory first.
+    const taskkill = win32.join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'taskkill.exe');
+    spawn(taskkill, ['/pid', String(pid), '/T', '/F'], { stdio: 'ignore', windowsHide: true })
+      .once('error', () => child.kill())
+      .once('exit', (code) => {
+        if (code !== 0) child.kill(); // at least the command itself, so the run ends
+      });
     return;
   }
-  const signal = (name: NodeJS.Signals) => {
-    try {
-      process.kill(-pid, name);
-    } catch {
-      // Already gone.
-    }
-  };
-  signal('SIGTERM');
-  setTimeout(() => signal('SIGKILL'), graceMs).unref();
+  signalGroup(pid, 'SIGTERM');
+  setTimeout(() => signalGroup(pid, 'SIGKILL'), graceMs).unref();
+}
+
+/** POSIX: signals the process group the command leads. */
+function signalGroup(pid: number, name: NodeJS.Signals): void {
+  try {
+    process.kill(-pid, name);
+  } catch {
+    // Already gone.
+  }
 }
 
 function run(
@@ -198,7 +207,7 @@ export function startActionRunner(inbox: Inbox, options: ActionRunnerOptions = {
       ? `timed out after ${timeoutMs} ms`
       : result.error !== undefined
         ? `could not run: ${result.error}`
-        : `exit code ${String(result.code)}`;
+        : `exit code ${String(result.code)} after ${now() - startedAt} ms`;
     const failures = action.failures + 1;
     if (failures > retryDelays.length) {
       // Give up on this batch rather than block every later message behind it.
@@ -239,7 +248,8 @@ export function startActionRunner(inbox: Inbox, options: ActionRunnerOptions = {
     async stop() {
       stopped = true;
       clearInterval(timer);
-      for (const { child } of running.values()) if (child) endTree(child, graceMs);
+      const children = [...running.values()].flatMap((r) => (r.child ? [r.child] : []));
+      for (const child of children) endTree(child, graceMs);
       let wait: NodeJS.Timeout | undefined;
       const late = new Promise<'late'>((resolve) => {
         wait = setTimeout(() => resolve('late'), stopWaitMs);
@@ -249,6 +259,8 @@ export function startActionRunner(inbox: Inbox, options: ActionRunnerOptions = {
         log(`WARNING actions: ${running.size} command(s) still running after ${stopWaitMs} ms; not waiting for them`);
       }
       clearTimeout(wait);
+      // POSIX: what a command started can outlive it, and the SIGKILL timer would die with evdock.
+      if (process.platform !== 'win32') for (const { pid } of children) if (pid !== undefined) signalGroup(pid, 'SIGKILL');
     },
   };
 }

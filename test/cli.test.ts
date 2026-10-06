@@ -79,6 +79,8 @@ test('action set / actions / action clear', async (t) => {
     r = await evdock('action', 'set', 'sub_cli', '--window', window, '--db', db, '--', 'x');
     assert.equal(r.code, 2, `--window ${JSON.stringify(window)}`);
   }
+  r = await evdock('action', 'set', 'sub_cli', '--max-per-hour', '99999999999999999999', '--db', db, '--', 'x');
+  assert.equal(r.code, 2, 'too large for the limit');
   r = await evdock('action', 'set', 'sub_cli', 'extra', 'words', '--db', db, '--', 'x');
   assert.equal(r.code, 2, 'words before -- are not the command');
   assert.match(r.out, /the command goes after --/);

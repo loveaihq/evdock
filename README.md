@@ -77,7 +77,7 @@ node dist/src/cli.js events demo
 node dist/src/cli.js subscribe demo incident.created
 ```
 
-The last one prints the subscription id: `subscribed sub_… to incident.created on demo, refresh before …`. Terminal 2 shows `200 verification …`, the server checking the callback, and from then on `200 stored-event …` for each incident: events are received, verified and stored from the moment you subscribe.
+The last one prints the subscription id: `subscribed sub_… to incident.created on demo, refresh before …`. Terminal 2 shows `200 verification …` (after the time), the server checking the callback, and from then on `200 stored-event …` for each incident: events are received, verified and stored from the moment you subscribe.
 
 Now choose what runs when they arrive. Put your subscription id in place of `<subscription-id>`:
 
@@ -88,12 +88,12 @@ node dist/src/cli.js action set <subscription-id> -- node examples/agent.mjs
 An action reacts to events that arrive after it is set. Those already stored stay in the inbox and do not wake the agent. Within about 25 seconds of `action set`, terminal 2 shows the next event arriving and the agent woken. Output is shortened here, and the ids and times will differ:
 
 ```
-200 stored-event hook=8fXPk-… webhook-id=evt_659d1237_2
-action sub_063431ee160dc7d5: running node with 1 message(s)
+2026-10-06 16:47:54 200 stored-event hook=8fXPk-… webhook-id=evt_659d1237_2
+2026-10-06 16:48:04 action sub_063431ee160dc7d5: running node with 1 message(s)
 
 [agent] woke up at 4:48:04 pm: 1 message(s) from demo / incident.created
 [agent]   evt_659d1237_2: INC-1002 P3 "Checkout latency above 2 s"
-action sub_063431ee160dc7d5: done in 130 ms
+2026-10-06 16:48:04 action sub_063431ee160dc7d5: done in 130 ms
 ```
 
 The action waits 10 seconds after the first new event before waking the agent, so a burst of events wakes it once. It wakes the agent at most 6 times an hour. Events that arrive over that limit are not dropped: they wait and go to the agent in the next run, up to 100 messages per run. With an incident every 15 seconds, the hourly limit is reached after a few minutes.

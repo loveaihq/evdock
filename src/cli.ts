@@ -47,6 +47,14 @@ const OPTIONS = {
 
 class UsageError extends Error {}
 
+/** Log lines of the long-running commands start with the local time. */
+function stamped(line: string): void {
+  const d = new Date();
+  const p = (n: number) => String(n).padStart(2, '0');
+  const time = `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+  console.log(`${time} ${line}`);
+}
+
 /** Opens the database; `withRelay` also loads the relay (and so needs its key in the environment). */
 function context(dbPath: string, withRelay: boolean): Context {
   const inbox = new Inbox(dbPath);
@@ -108,12 +116,13 @@ async function main(argv: string[]): Promise<void> {
       key,
       host: values.host,
       port: Number(values.port ?? 8788),
-      log: (line) => console.log(line),
+      log: stamped,
     });
     console.log(`evdock relay on ${relay.url} (plain HTTP: put TLS in front of it)`);
     const shutdown = () => void relay.close().then(() => process.exit(0));
     process.once('SIGINT', shutdown);
     process.once('SIGTERM', shutdown);
+    process.once('SIGHUP', shutdown); // the terminal closed
     return;
   }
 
@@ -147,12 +156,13 @@ async function main(argv: string[]): Promise<void> {
       dbPath: values.db,
       host: values.host,
       port: Number(values.port ?? 8787),
-      log: (line) => console.log(line),
+      log: stamped,
     });
     console.log(`evdock receiving on ${daemon.url}/hooks/<token>`);
     const shutdown = () => void daemon.stop().then(() => process.exit(0));
     process.once('SIGINT', shutdown);
     process.once('SIGTERM', shutdown);
+    process.once('SIGHUP', shutdown); // the terminal closed
     return;
   }
 
@@ -218,8 +228,8 @@ async function main(argv: string[]): Promise<void> {
     if (commandLine.length === 0 || !commandLine[0]) throw new UsageError('action set needs a command after --');
     const maxPerHourText = values['max-per-hour'] ?? String(DEFAULT_MAX_PER_HOUR);
     const windowText = values.window ?? String(DEFAULT_WINDOW_MS / 1000);
-    if (!/^[0-9]+$/.test(maxPerHourText) || Number(maxPerHourText) < 1) {
-      throw new UsageError('--max-per-hour must be a whole number, 1 or more');
+    if (!/^[0-9]+$/.test(maxPerHourText) || Number(maxPerHourText) < 1 || Number(maxPerHourText) > 3600) {
+      throw new UsageError('--max-per-hour must be a whole number from 1 to 3600');
     }
     if (!/^[0-9]+(\.[0-9]+)?$/.test(windowText)) throw new UsageError('--window must be a number of seconds, 0 or more');
     const maxPerHour = Number(maxPerHourText);

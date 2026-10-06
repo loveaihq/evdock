@@ -122,7 +122,8 @@ test('lifecycle: discover, list, subscribe with handshake, deliveries, refreshes
   const emitted = [s.mock.emit('incident.created', { severity: 'P1', n: 1 }), s.mock.emit('incident.created', { severity: 'P1', n: 2 })];
   const filtered = s.mock.emit('incident.created', { severity: 'P3', n: 3 }); // not delivered: arguments don't match
   await until('two deliveries', () => eventIds(daemon, sub.token).length === 2);
-  assert.deepEqual(eventIds(daemon, sub.token), emitted.map((e) => e.eventId));
+  // The mock sends deliveries concurrently and webhooks promise no order: compare as sets.
+  assert.deepEqual(eventIds(daemon, sub.token).sort(), emitted.map((e) => e.eventId).sort());
 
   // Two refreshes (TTL 3 s, refresh at 2 s) with no deliveries: the saved cursor still moves to the
   // server's watermark, past the filtered event too.
