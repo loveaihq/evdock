@@ -1,0 +1,94 @@
+import assert from 'node:assert/strict';
+import { createServer } from 'node:http';
+import { join } from 'node:path';
+import { test } from 'node:test';
+import { runSuite } from '../src/conformance/suite.js';
+import { createReceiver } from '../src/http.js';
+import { Inbox } from '../src/inbox.js';
+import { decodeSecret, verifySignature } from '../src/signature.js';
+import { close, listen, newSecret, newToken, tempDir } from './helpers.js';
+
+test('evdock passes every check, including SHOULD and MAY', async (t) => {
+  const { dir, cleanup } = tempDir();
+  const inbox = new Inbox(join(dir, 'inbox.db'));
+  const server = createReceiver({ inbox });
+  const base = await listen(server);
+  t.after(async () => {
+    await close(server);
+    inbox.close();
+    cleanup();
+  });
+  const token = newToken();
+  const secret = newSecret();
+  inbox.addSubscription(token, secret);
+  inbox.confirmSubscription(token, 'sub_conformance');
+
+  const report = await runSuite({ url: `${base}/hooks/${token}`, secret, subscriptionId: 'sub_conformance' });
+  const failed = report.results.filter((r) => r.outcome === 'fail').map((r) => `${r.id}: ${r.actual}`);
+  assert.deepEqual(failed, []);
+  assert.equal(report.conformant, true);
+  assert.equal(report.results.length, 15);
+});
+
+test('a receiver that accepts everything is caught', async (t) => {
+  const server = createServer((req, res) => {
+    req.resume();
+    req.on('end', () => res.writeHead(200).end());
+  });
+  const base = await listen(server);
+  t.after(() => close(server));
+
+  const report = await runSuite({ url: `${base}/hooks/x`, secret: newSecret(), subscriptionId: 'sub_x' });
+  const failed = report.results.filter((r) => r.outcome === 'fail').map((r) => r.id);
+  assert.equal(report.conformant, false);
+  for (const id of [
+    'bad-signature',
+    'stale-timestamp',
+    'verification',
+    'oversized',
+    'missing-webhook-id',
+    'missing-webhook-timestamp',
+    'missing-webhook-signature',
+  ]) {
+    assert.ok(failed.includes(id), id);
+  }
+});
+
+test('a receiver that verifies re-serialized JSON fails raw-body', async (t) => {
+  const secret = newSecret();
+  const key = decodeSecret(secret);
+  const server = createServer((req, res) => {
+    const chunks: Buffer[] = [];
+    req.on('data', (c: Buffer) => chunks.push(c));
+    req.on('end', () => {
+      let reserialized: Buffer;
+      try {
+        reserialized = Buffer.from(JSON.stringify(JSON.parse(Buffer.concat(chunks).toString())));
+      } catch {
+        return res.writeHead(400).end();
+      }
+      const h = req.headers as Record<string, string | undefined>;
+      const [id, ts, sig] = [h['webhook-id'], h['webhook-timestamp'], h['webhook-signature']];
+      if (!id || !ts || !sig) return res.writeHead(400).end();
+      const ok = verifySignature(key, id, ts, reserialized, sig);
+      res.writeHead(ok ? 200 : 401).end();
+    });
+  });
+  const base = await listen(server);
+  t.after(() => close(server));
+
+  const report = await runSuite({ url: `${base}/hooks/x`, secret, subscriptionId: 'sub_x' });
+  const byId = new Map(report.results.map((r) => [r.id, r.outcome]));
+  assert.equal(byId.get('valid-event'), 'pass', 'compact JSON survives re-serialization');
+  assert.equal(byId.get('raw-body'), 'fail');
+  assert.equal(report.conformant, false);
+});
+
+test('an unreachable receiver fails without throwing', async () => {
+  const server = createServer();
+  const base = await listen(server);
+  await close(server);
+  const report = await runSuite({ url: `${base}/hooks/x`, secret: newSecret(), subscriptionId: 'sub_x' });
+  assert.equal(report.conformant, false);
+  assert.match(report.results[0]!.actual, /^error: /);
+});
