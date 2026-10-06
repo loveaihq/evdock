@@ -22,11 +22,11 @@ evdock 让不在公网上的 agent 也能收 MCP Events 的 webhook 投递：一
 
 ## 组件职责
 
-守护进程是默认模式。中继默认部署成 Cloudflare Worker；同一份中继逻辑也能加 `--relay` 在任意 Node 主机上跑。
+守护进程是默认模式。中继默认部署成 Cloudflare Worker；同一份中继逻辑也能用 `evdock relay serve` 在任意 Node 主机上跑。
 
 | 组件 | 跑在哪 | 职责 |
 | --- | --- | --- |
-| 中继 | Cloudflare Worker 免费层，用免费的 workers.dev 域名 | 收 MCP 服务端的 POST；发布接收声明；回验证握手；原样存下 body 和头，落盘后才回 2xx；守护进程连上来时转发。不持有签名密钥。 |
+| 中继 | Cloudflare Worker 免费层，用免费的 workers.dev 域名 | 收 MCP 服务端的 POST；对守护进程登记过的路径回验证握手；原样存下 body 和头，落盘后才回 2xx；守护进程连上来时转发。不持有签名密钥。 |
 | 订阅管理 | 本地守护进程 | 以 MCP 客户端身份连服务端：`events/list`、`events/subscribe`、到期前续订、`events/unsubscribe`；每个订阅生成一个 `whsec_` 密钥；保存游标。 |
 | 接收校验 | 本地守护进程 | 对原始 body 验 HMAC；查时间戳；按 `webhook-id` 去重；识别 gap、terminated、verification 三种控制包。 |
 | 收件箱 | 本地守护进程 | SQLite 存事件、订阅、游标。 |
@@ -44,7 +44,7 @@ https://github.com/modelcontextprotocol/experimental-ext-triggers-events/blob/ma
 | 规范对接收方的要求 | v0 做法 |
 | --- | --- |
 | 回调地址必须是 https，且不能是内网或本地地址 | 中继提供公网 https；每个订阅一个不可猜的路径 `/hooks/<随机令牌>` |
-| 投递前要确认接收方愿意收 | 两条都支持：发布 `/.well-known/mcp-webhook-receiver.json` 声明 `/hooks/`；对已登记路径的 verification 包回显 `challenge` |
+| 投递前要确认接收方愿意收 | 只对已登记路径的 verification 包回显 `challenge`。不发布 `/.well-known/mcp-webhook-receiver.json`：它声明的前缀下任何路径都算已验证，别人就能拿中继地址去订阅（2026-10-06 改，见 `docs/M3-TASK.md`） |
 | 签名密钥由客户端提供，`whsec_` 加 24 到 64 字节的 base64 | 守护进程用系统随机源为每个订阅生成 32 字节 |
 | 验签必须对原始 body 字节做 | 中继保存原始字节，不重新序列化；守护进程验签 |
 | 密钥轮换期一个头里可能有多个签名 | 任一个通过即接受 |

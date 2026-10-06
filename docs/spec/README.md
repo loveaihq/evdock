@@ -12,6 +12,7 @@
 | `mcp-2026-07-28/server-discover.mdx` | 同上 `server/discover.mdx` | `8e12bf3` | 同上 |
 | `mcp-2026-07-28/changelog.mdx` | 同上 `changelog.mdx` | `8e12bf3` | 同上 |
 | `standard-webhooks-2026-10-06.md` | standard-webhooks/standard-webhooks `spec/standard-webhooks.md` | `bece768` | Apache-2.0 |
+| `cloudflare-2026-10-06/*.md`（11 页：Workers 和 Durable Objects 的限额、计费、SQLite 存储接口、生命周期、迁移、secret、本地开发；D1 计费里 rows read 的定义） | cloudflare/cloudflare-docs，developers.cloudflare.com 的 markdown 版，2026-10-06 取 | — | CC-BY-4.0 |
 | `openai-mcp-events-2026-10-06.md`（只在本地，不提交） | https://developers.openai.com/plugins/build/mcp-events.md，2026-10-06 取 | sha256 `68c534c9…2a68e0632` | OpenAI 文档，未开放许可 |
 
 OpenAI 的页面不进仓库。要核对时按上面的地址重新取，比对 sha256；对不上说明页面改过。
