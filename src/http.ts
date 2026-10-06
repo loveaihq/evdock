@@ -55,7 +55,9 @@ export function createReceiver(options: ReceiverOptions): Server {
   async function serve(req: IncomingMessage, res: ServerResponse): Promise<void> {
     const receivedAtMs = now();
     // Matched as a plain string: request targets are attacker-controlled and need not be valid URLs.
-    const match = HOOK_PATH.exec((req.url ?? '').split('?')[0]!);
+    // Absolute-form targets (http://host/path) are reduced to their path, as HTTP/1.1 requires.
+    const target = (req.url ?? '').replace(/^https?:\/\/[^/]*/i, '');
+    const match = HOOK_PATH.exec(target.split('?')[0]!);
     const reply = (status: number, outcome: string, json?: unknown) => {
       if (json === undefined) {
         res.writeHead(status).end();

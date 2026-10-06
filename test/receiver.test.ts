@@ -200,6 +200,37 @@ test('a request target that is not a valid URL gets 404 and does not crash the r
   assert.equal((await post(register(), eventJson('after'))).status, 200, 'still serving');
 });
 
+test('an absolute-form request target reaches the hook', async (t) => {
+  const { base, register } = await setup(t);
+  const sub = register();
+  const { port } = new URL(base);
+  const id = 'evt_absolute';
+  const body = eventJson(id);
+  const status = await new Promise<number>((resolve, reject) => {
+    const req = request(
+      {
+        host: '127.0.0.1',
+        port: Number(port),
+        method: 'POST',
+        path: sub.url, // full URL as the request target
+        headers: {
+          'webhook-id': id,
+          'webhook-timestamp': String(NOW),
+          'webhook-signature': officialSign(sub.secret, id, NOW, body),
+          'x-mcp-subscription-id': sub.subscriptionId,
+        },
+      },
+      (res) => {
+        res.resume();
+        resolve(res.statusCode!);
+      },
+    );
+    req.on('error', reject);
+    req.end(Buffer.from(body));
+  });
+  assert.equal(status, 200);
+});
+
 // node:http (unlike fetch) can send repeated header lines and raw latin1 header bytes.
 function rawPost(url: string, headers: Record<string, string | string[]>, body: string) {
   return new Promise<number>((resolve, reject) => {
@@ -268,7 +299,8 @@ test('terminated: 200, subscription removed, later deliveries get 404', async (t
   const body = JSON.stringify({ type: 'terminated', error: { code: -32012, message: 'Forbidden', data: { reason: 'Access revoked' } } });
   assert.equal((await post(sub, body, { id: 'msg_terminated_1' })).status, 200);
   assert.equal(inbox.getSubscription(sub.token), undefined);
-  assert.equal(inbox.messages(sub.token).at(-1)?.kind, 'terminated');  assert.equal((await post(sub, eventJson('late'))).status, 404);
+  assert.equal(inbox.messages(sub.token).at(-1)?.kind, 'terminated');
+  assert.equal((await post(sub, eventJson('late'))).status, 404);
 });
 
 test('unknown control type: 200 and stored for the client', async (t) => {
