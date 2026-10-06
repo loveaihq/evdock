@@ -61,7 +61,7 @@ function assertNoneOn(inbox: Inbox, action: string): void {
   if (live.length === 0) return;
   inbox.close();
   throw new Error(
-    `${live.length} subscription(s) still receive through ${current.url}: ${live.map(label).join(', ')}\n` +
+    `${live.length} subscription(s) still receive through ${current.url}: ${live.map(label).join(', ')}. ` +
       `${action} would leave them delivering to a relay nobody fetches from. Unsubscribe them first.`,
   );
 }

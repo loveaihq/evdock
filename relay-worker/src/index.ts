@@ -4,6 +4,14 @@
 import { DurableObject } from 'cloudflare:workers';
 import { createRelay, RelayStore, type Row, type Sql, type SqlValue } from '../../src/relay/core.js';
 
+declare global {
+  interface Env {
+    // A secret set with `wrangler secret put RELAY_KEY`. It is deliberately not declared in
+    // wrangler.jsonc (see there), so `wrangler types` does not know about it.
+    RELAY_KEY?: string;
+  }
+}
+
 /** Durable Object SQLite behind the relay's Sql interface: same value types as node:sqlite. */
 function durableSql(storage: DurableObjectStorage): Sql {
   return {
